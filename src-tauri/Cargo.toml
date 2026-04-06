@@ -1,0 +1,97 @@
+[package]
+name = "vibe-remote"
+version = "0.1.0"
+description = "A QUIC-powered Remote Desktop for the Modern Era"
+authors = ["you"]
+edition = "2024"
+rust-version = "1.85"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "vibe_remote_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# QUIC networking
+quinn = { version = "0.11", features = ["runtime-tokio"] }
+rcgen = "0.13"
+rustls = { version = "0.23", features = ["std"] }
+sha2 = "0.10"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Screen capture (macOS only for now - Windows DXGI pending)
+screencapturekit = "1.4"
+
+# Input injection
+enigo = "0.2"
+
+# Image processing for compression
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+flate2 = "1"
+
+# Serialization for IPC
+# Replaced bincode 1.x (unmaintained RUSTSEC-2025-0141) with rmp-serde (MessagePack)
+rmp-serde = "1"
+
+# Time utilities
+chrono = { version = "0.4", features = ["serde"] }
+
+# Video encoding - Hardware acceleration
+core-video = "0.1"
+core-foundation = "0.9"
+
+# Clipboard sync
+arboard = "3"
+
+# Directory paths
+dirs = "5"
+
+# STUN/TURN for NAT traversal
+stun = "0.5"
+turn = "0.8"
+
+# Security - Ed25519 + Noise Protocol
+# NOTE: rand 0.8 is required for ed25519-dalek compatibility
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+rand_core = "0.6"
+snow = "0.9"
+base64 = "0.22"
+zeroize = "1"
+
+# Bytes manipulation
+bytes = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
