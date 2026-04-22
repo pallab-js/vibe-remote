@@ -22,18 +22,22 @@ VibeRemote is a high-performance remote desktop application that delivers sub-10
 ## Features
 
 ### Core
-- Native macOS screen capture via ScreenCaptureKit
+- Native macOS screen capture via ScreenCaptureKit (macOS 13+)
 - QUIC networking with TLS 1.3 encryption (quinn)
 - Custom congestion control tuned for real-time video (BBR-like)
 - JPEG + zlib compression (~40:1 ratio) with delta frames
 - Buffer pool management for optimized memory usage
 - Hardware H.264 encoder infrastructure (VideoToolbox)
+- Adaptive bitrate (500K-8Mbps based on RTT/packet loss)
+- MessagePack binary wire protocol for efficient serialization
+- Connection modes: Local (capture), Host (server), Client (viewer)
 
 ### Input & Control
 - Full mouse support (move, click, wheel, right-click, middle-click)
-- Full keyboard support (all keys including function keys)
+- Full keyboard support (all keys including function keys F1-F12, modifiers)
 - Coordinate scaling for multi-resolution setups
 - **View-only mode by default** — enable remote control with explicit consent
+- Clipboard access with consent required
 
 ### Security
 - QUIC with TLS 1.3 (native encryption)
@@ -41,7 +45,7 @@ VibeRemote is a high-performance remote desktop application that delivers sub-10
 - Ed25519 identity system with persistent keypairs
 - Noise Protocol XX handshake infrastructure
 - Backend-enforced consent for remote control and clipboard
-- Rate limiting on all input and clipboard commands
+- Rate limiting on all input (100 mouse/sec, 50 keys/sec, 5 clipboard/min)
 - Key storage with 0o600 permissions + memory zeroization
 - Comprehensive audit logging (no user content in logs)
 - Content Security Policy enforcement
@@ -54,11 +58,14 @@ VibeRemote is a high-performance remote desktop application that delivers sub-10
 - Self-host relay support (see [RELAY_SERVER.md](RELAY_SERVER.md))
 
 ### UI
-- Deep Slate dark theme with glassmorphism
-- Svelte 5 runes for reactive state
-- Auto-hiding floating toolbar
-- Real-time FPS and latency display
-- Multi-display selection
+- Deep Slate dark theme with glassmorphism and macOS vibrancy effects
+- Svelte 5 runes for reactive state management
+- Auto-hiding floating toolbar (shows/hides after 3 seconds)
+- Real-time FPS and latency display with network vitality sparkline
+- Multi-display selection — lists all available monitors
+- Onboarding wizard — step-by-step setup for new users
+- Connection history with trust levels (trusted/ask/blocked)
+- Consent modals for input and clipboard with security warnings
 
 ## Installation
 
@@ -127,28 +134,42 @@ vibe-remote/
 ├── src/                          # SvelteKit frontend
 │   ├── routes/
 │   │   └── +page.svelte         # Main dashboard (all UI logic)
+│   ├── lib/
+│   │   ├── components/          # Reusable components
+│   │   │   └── ConnectPanel.svelte
+│   │   ├── stores/              # Svelte 5 runes stores
+│   │   │   ├── settings.svelte.ts
+│   │   │   ├── connection-history.svelte.ts
+│   │   │   └── session.svelte.ts
+│   │   ├── utils/               # Utilities
+│   │   │   └── codec.ts
+│   │   └── design-system.css   # CSS variables + macOS vibrancy
 │   ├── app.css                  # Tailwind theme
 │   └── app.html                 # HTML template
 ├── src-tauri/                    # Rust backend
 │   ├── src/
-│   │   ├── lib.rs               # Main library: AppState, 30+ Tauri commands
+│   │   ├── lib.rs               # Main library: AppState, 40+ Tauri commands
 │   │   ├── main.rs              # Entry point
 │   │   ├── capture.rs           # ScreenCaptureKit integration
 │   │   ├── capture_windows.rs   # Windows DXGI (conditional compilation)
-│   │   ├── transport.rs         # QUIC server/client + certificate pinning
-│   │   ├── input.rs             # enigo input injection
-│   │   ├── encoder.rs           # JPEG+zlib compression + buffer pool
-│   │   ├── h264_encoder.rs      # Hardware H.264 encoder
-│   │   ├── session.rs           # Session state + auto-reconnect
-│   │   ├── auth.rs              # Ed25519 + Noise Protocol
-│   │   ├── nat_traversal.rs     # STUN/TURN implementation
-│   │   ├── error.rs             # Centralized error types
-│   │   └── logging.rs           # Tracing subscriber
+│   │   ├── transport.rs        # QUIC server/client + certificate pinning
+│   │   ├── input.rs            # enigo input injection
+│   │   ├── encoder.rs          # JPEG+zlib compression + buffer pool
+│   │   ├── h264_encoder.rs     # Hardware H.264 encoder
+│   │   ├── session.rs          # Session state + auto-reconnect
+│   │   ├── connection.rs       # Connection state machine
+│   │   ├── auth.rs             # Ed25519 + Noise Protocol
+│   │   ├── protocol.rs         # MessagePack binary wire protocol
+│   │   ├── adaptive_bitrate.rs # Network-adaptive quality control
+│   │   ├── nat_traversal.rs    # STUN/TURN implementation
+│   │   ├── audio.rs            # CoreAudio capture (stub)
+│   │   ├── error.rs            # Centralized error types
+│   │   └── logging.rs          # Tracing subscriber
 │   ├── tests/
-│   │   └── integration_test.rs  # Integration tests + benchmarks
-│   └── tauri.conf.json          # Tauri configuration
+│   │   └── integration_test.rs # Integration tests + benchmarks
+│   └── tauri.conf.json         # Tauri configuration
 └── .github/workflows/
-    └── build.yml                # CI/CD pipeline
+    └── build.yml               # CI/CD pipeline
 ```
 
 ## Development
