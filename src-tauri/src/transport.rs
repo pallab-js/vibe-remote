@@ -5,15 +5,19 @@
 //! - Unreliable datagrams for video frames (latency > perfection)
 //! - Built-in TLS 1.3 encryption
 
-use std::sync::Arc;
 use std::net::SocketAddr;
-use tracing::{info, error, debug};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
-use quinn::{Endpoint, ServerConfig, ClientConfig, TransportConfig, Connection, RecvStream, SendStream, VarInt};
-use quinn::crypto::rustls::{QuicServerConfig, QuicClientConfig};
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use quinn::{
+    ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig,
+    VarInt,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::error::{VibeResult, VibeError};
+use crate::error::{VibeError, VibeResult};
 
 /// QUIC configuration
 #[derive(Debug, Clone)]
@@ -45,15 +49,69 @@ impl Default for QuicConfig {
 /// Generate a self-signed certificate for QUIC
 fn generate_cert() -> VibeResult<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     info!("Generating self-signed certificate for QUIC");
-    
+
     let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .map_err(|e| VibeError::Config(format!("Certificate generation failed: {}", e)))?;
-    
+
     let cert_der = CertificateDer::from(certified_key.cert.der().to_vec());
     let key_der = PrivateKeyDer::try_from(certified_key.key_pair.serialize_der())
         .map_err(|e| VibeError::Config(format!("Key conversion failed: {}", e)))?;
-    
+
     Ok((vec![cert_der], key_der))
+}
+
+/// Get the TOFU persistence directory
+fn get_tofu_dir() -> VibeResult<PathBuf> {
+    let dir = dirs::data_dir()
+        .ok_or_else(|| VibeError::Config("No data directory found".into()))?
+        .join("vibe-remote")
+        .join("tofu");
+
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| VibeError::Config(format!("Failed to create tofu directory: {}", e)))?;
+
+    Ok(dir)
+}
+
+/// Persist a server fingerprint for TOFU
+fn persist_fingerprint(server_name: &str, fingerprint: &str) -> VibeResult<()> {
+    use sha2::{Digest, Sha256};
+
+    let dir = get_tofu_dir()?;
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(server_name.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    let path = dir.join(format!("{}.fingerprint", hash));
+    std::fs::write(&path, fingerprint)
+        .map_err(|e| VibeError::Config(format!("Failed to persist fingerprint: {}", e)))?;
+
+    info!("Persisted TOFU fingerprint for server: {}", server_name);
+    Ok(())
+}
+
+/// Load a persisted fingerprint for TOFU
+fn load_fingerprint(server_name: &str) -> VibeResult<Option<String>> {
+    use sha2::{Digest, Sha256};
+
+    let dir = get_tofu_dir()?;
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(server_name.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    let path = dir.join(format!("{}.fingerprint", hash));
+
+    if path.exists() {
+        let fingerprint = std::fs::read_to_string(&path)
+            .map_err(|e| VibeError::Config(format!("Failed to read fingerprint: {}", e)))?;
+        Ok(Some(fingerprint.trim().to_string()))
+    } else {
+        Ok(None)
+    }
 }
 
 /// QUIC transport wrapper
@@ -74,7 +132,7 @@ impl QuicTransport {
         info!("Initializing QUIC server on {}", config.bind_addr);
 
         let (certs, key) = generate_cert()?;
-        
+
         // Compute and log our certificate fingerprint for sharing
         let fingerprint = FingerprintVerifier::compute_fingerprint(&certs[0]);
         info!("Server certificate fingerprint: {}", fingerprint);
@@ -100,13 +158,13 @@ impl QuicTransport {
         transport_config.datagram_send_buffer_size(2 * 1024 * 1024); // 2MB
         transport_config.datagram_receive_buffer_size(Some(4 * 1024 * 1024)); // 4MB
         transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
-        
+
         // Custom congestion control optimized for real-time video
         // Use BBR-like settings for low-latency streaming
         transport_config.send_window(8 * 1024 * 1024); // 8MB send window (u64)
         transport_config.receive_window(VarInt::from_u32(8 * 1024 * 1024)); // 8MB receive
         transport_config.stream_receive_window(VarInt::from_u32(4 * 1024 * 1024)); // 4MB per stream
-        
+
         server_config.transport_config(Arc::new(transport_config));
 
         // Create endpoint using Endpoint::server (binds automatically)
@@ -114,8 +172,8 @@ impl QuicTransport {
 
         info!("QUIC server initialized successfully");
 
-        Ok(Self { 
-            endpoint, 
+        Ok(Self {
+            endpoint,
             config,
             connection: None,
             pinned_fingerprint: Some(fingerprint),
@@ -135,8 +193,8 @@ impl QuicTransport {
 
         info!("QUIC client initialized successfully");
 
-        Ok(Self { 
-            endpoint, 
+        Ok(Self {
+            endpoint,
             config,
             connection: None,
             pinned_fingerprint: None,
@@ -181,10 +239,15 @@ impl QuicTransport {
         &mut self,
         server_fingerprint: String,
     ) -> VibeResult<Connection> {
-        let remote_addr = self.config.remote_addr
+        let remote_addr = self
+            .config
+            .remote_addr
             .ok_or_else(|| VibeError::Connection("No remote address configured".to_string()))?;
 
-        info!("Connecting to QUIC server at {} (pinned: {})", remote_addr, server_fingerprint);
+        info!(
+            "Connecting to QUIC server at {} (pinned: {})",
+            remote_addr, server_fingerprint
+        );
 
         // Build client config with certificate pinning
         let verifier = FingerprintVerifier::new(server_fingerprint.clone());
@@ -202,11 +265,10 @@ impl QuicTransport {
         transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
         client_config.transport_config(Arc::new(transport_config));
 
-        let connection = self.endpoint.connect_with(
-            client_config,
-            remote_addr,
-            &self.config.server_name,
-        )?.await
+        let connection = self
+            .endpoint
+            .connect_with(client_config, remote_addr, &self.config.server_name)?
+            .await
             .map_err(|e| VibeError::Connection(format!("Connection failed: {}", e)))?;
 
         info!("QUIC connection established with pinned certificate");
@@ -217,19 +279,20 @@ impl QuicTransport {
 
     /// SEC-1: Connect to a remote QUIC endpoint with TOFU (Trust On First Use)
     /// This accepts the first certificate seen, storing it for future verification.
-    /// Less secure than pinning, but better than accepting any certificate.
+    /// On subsequent connections, fingerprints are verified against stored values.
     pub async fn connect_tofu(&mut self) -> VibeResult<Connection> {
-        let remote_addr = self.config.remote_addr
+        let remote_addr = self
+            .config
+            .remote_addr
             .ok_or_else(|| VibeError::Connection("No remote address configured".to_string()))?;
 
         info!("Connecting to QUIC server at {} (TOFU mode)", remote_addr);
 
-        // Build client config that accepts any certificate (TOFU)
-        // NOTE: This is less secure than pinning. In production, users should
-        // exchange fingerprints out-of-band for MITM protection.
+        // Build client config with TOFU verifier that persists fingerprints
+        let verifier = TofuVerifier::new(self.config.server_name.clone());
         let rustls_client = rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(TofuVerifier::new()))
+            .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
 
         let quic_crypto = QuicClientConfig::try_from(rustls_client)
@@ -241,16 +304,13 @@ impl QuicTransport {
         transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
         client_config.transport_config(Arc::new(transport_config));
 
-        let connection = self.endpoint.connect_with(
-            client_config,
-            remote_addr,
-            &self.config.server_name,
-        )?.await
+        let connection = self
+            .endpoint
+            .connect_with(client_config, remote_addr, &self.config.server_name)?
+            .await
             .map_err(|e| VibeError::Connection(format!("Connection failed: {}", e)))?;
 
-        // Store the certificate fingerprint we just saw for future reference
-        // In a full TOFU implementation, this would be persisted to disk
-        info!("SEC-1: TOFU connection established. Server fingerprint should be recorded for future pinning.");
+        info!("SEC-1: TOFU connection established with persistent fingerprint storage.");
         self.connection = Some(connection.clone());
         Ok(connection)
     }
@@ -264,22 +324,29 @@ impl QuicTransport {
 
     /// Open a reliable bidirectional stream
     pub async fn open_stream(&self) -> VibeResult<(SendStream, RecvStream)> {
-        let connection = self.connection.as_ref()
+        let connection = self
+            .connection
+            .as_ref()
             .ok_or_else(|| VibeError::Connection("Not connected".to_string()))?;
-        
-        let (send, recv) = connection.open_bi().await
+
+        let (send, recv) = connection
+            .open_bi()
+            .await
             .map_err(|e| VibeError::Connection(format!("Failed to open stream: {}", e)))?;
-        
+
         debug!("Opened bidirectional stream");
         Ok((send, recv))
     }
 
     /// Send unreliable datagram (for video frames)
     pub async fn send_datagram(&self, data: bytes::Bytes) -> VibeResult<()> {
-        let connection = self.connection.as_ref()
+        let connection = self
+            .connection
+            .as_ref()
             .ok_or_else(|| VibeError::Connection("Not connected".to_string()))?;
 
-        connection.send_datagram(data.clone())
+        connection
+            .send_datagram(data.clone())
             .map_err(|e| VibeError::Connection(format!("Failed to send datagram: {}", e)))?;
 
         debug!("Sent datagram ({} bytes)", data.len());
@@ -293,12 +360,16 @@ impl QuicTransport {
 
     /// Receive datagrams
     pub async fn receive_datagram(&self) -> VibeResult<bytes::Bytes> {
-        let connection = self.connection.as_ref()
+        let connection = self
+            .connection
+            .as_ref()
             .ok_or_else(|| VibeError::Connection("Not connected".to_string()))?;
-        
-        let data = connection.read_datagram().await
+
+        let data = connection
+            .read_datagram()
+            .await
             .map_err(|e| VibeError::Connection(format!("Failed to receive datagram: {}", e)))?;
-        
+
         Ok(data)
     }
 
@@ -312,7 +383,7 @@ impl QuicTransport {
             match connection.accept_bi().await {
                 Ok((mut send, mut recv)) => {
                     debug!("Accepted bidirectional stream from {}", remote);
-                    
+
                     // Spawn handler for this stream
                     tokio::spawn(async move {
                         // Echo back for now (will be replaced with actual command handling)
@@ -325,7 +396,7 @@ impl QuicTransport {
                         };
 
                         debug!("Received {} bytes from {}", buffer.len(), remote);
-                        
+
                         // Send response
                         if let Err(e) = send.write_all(&buffer).await {
                             error!("Stream write error: {}", e);
@@ -338,7 +409,7 @@ impl QuicTransport {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -366,10 +437,10 @@ impl FingerprintVerifier {
             expected_fingerprint: fingerprint,
         }
     }
-    
+
     /// Compute SHA256 fingerprint of a certificate DER
     fn compute_fingerprint(cert: &CertificateDer<'_>) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(cert.as_ref());
         let result = hasher.finalize();
@@ -387,7 +458,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         let actual_fingerprint = Self::compute_fingerprint(end_entity);
-        
+
         if actual_fingerprint == self.expected_fingerprint {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
@@ -430,15 +501,16 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 }
 
 /// SEC-1: TOFU (Trust On First Use) certificate verifier
-/// Accepts any certificate on first connection and logs the fingerprint.
-/// In a full implementation, the fingerprint would be persisted to disk
-/// and used for subsequent connections (pinning).
+/// Accepts any certificate on first connection, persists the fingerprint,
+/// and uses persisted fingerprints for subsequent connections (pinning).
 #[derive(Debug)]
-struct TofuVerifier {}
+struct TofuVerifier {
+    server_name: String,
+}
 
 impl TofuVerifier {
-    fn new() -> Self {
-        Self {}
+    fn new(server_name: String) -> Self {
+        Self { server_name }
     }
 }
 
@@ -451,10 +523,45 @@ impl rustls::client::danger::ServerCertVerifier for TofuVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        // SEC-1: TOFU - accept any certificate and log the fingerprint
         let fingerprint = FingerprintVerifier::compute_fingerprint(end_entity);
-        info!("SEC-1 TOFU: Accepted server certificate with fingerprint: {}", fingerprint);
-        info!("SEC-1 TOFU: Record this fingerprint and use it for future connections.");
+
+        // Check if we have a persisted fingerprint for this server
+        match load_fingerprint(&self.server_name) {
+            Ok(Some(stored_fp)) if stored_fp == fingerprint => {
+                info!(
+                    "SEC-1 TOFU: Verified against stored fingerprint for {}",
+                    self.server_name
+                );
+            }
+            Ok(Some(stored_fp)) if stored_fp != fingerprint => {
+                // Fingerprint changed - potential MITM attack!
+                error!(
+                    "SEC-1 TOFU WARNING: Fingerprint mismatch! Expected: {}, Got: {}",
+                    stored_fp, fingerprint
+                );
+                error!(
+                    "SEC-1 TOFU: This could be a man-in-the-middle attack. Rejecting connection."
+                );
+                return Err(rustls::Error::General(format!(
+                    "Certificate fingerprint changed! Expected: {}, Got: {}. Connection rejected for security.",
+                    stored_fp, fingerprint
+                )));
+            }
+            _ => {
+                // First connection or no stored fingerprint - persist it
+                info!(
+                    "SEC-1 TOFU: First connection to {}. Recording fingerprint.",
+                    self.server_name
+                );
+                info!(
+                    "SEC-1 TOFU: Fingerprint: {} (save this for future connections)",
+                    fingerprint
+                );
+                if let Err(e) = persist_fingerprint(&self.server_name, &fingerprint) {
+                    warn!("SEC-1 TOFU: Failed to persist fingerprint: {}", e);
+                }
+            }
+        }
 
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }
@@ -491,8 +598,12 @@ impl rustls::client::danger::ServerCertVerifier for TofuVerifier {
 /// Create a local QUIC tunnel for testing
 pub async fn create_local_tunnel() -> VibeResult<(QuicTransport, QuicTransport)> {
     use std::net::{Ipv4Addr, SocketAddrV4};
-    
-    let server_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4567));
+    use std::sync::atomic::{AtomicU16, Ordering};
+
+    static PORT_COUNTER: AtomicU16 = AtomicU16::new(5600);
+
+    let port = PORT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let server_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
     let client_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
 
     let server_config = QuicConfig {
@@ -515,7 +626,9 @@ pub async fn create_local_tunnel() -> VibeResult<(QuicTransport, QuicTransport)>
     let mut client = QuicTransport::new_client(client_config).await?;
 
     // Connect client to server using the server's fingerprint
-    let fingerprint = server.pinned_fingerprint.clone()
+    let fingerprint = server
+        .pinned_fingerprint
+        .clone()
         .ok_or_else(|| VibeError::Config("Server has no fingerprint".to_string()))?;
     client.connect_with_fingerprint(fingerprint).await?;
 

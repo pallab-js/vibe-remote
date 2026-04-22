@@ -1,0 +1,184 @@
+/* VibeRemote macOS Design System */
+
+:root {
+  /* macOS Sequoia vibrancy palette */
+  --vr-bg-base: rgba(26, 26, 32, 0.97);
+  --vr-bg-elevated: rgba(36, 36, 44, 0.95);
+  --vr-bg-overlay: rgba(46, 46, 56, 0.90);
+  --vr-bg-glass: rgba(255, 255, 255, 0.04);
+
+  /* Accent - electric cyan-blue */
+  --vr-accent: #0ea5e9;
+  --vr-accent-hover: #38bdf8;
+  --vr-accent-glow: rgba(14, 165, 233, 0.35);
+
+  /* Status colors */
+  --vr-success: #10b981;
+  --vr-warning: #f59e0b;
+  --vr-danger: #ef4444;
+  --vr-info: #6366f1;
+
+  /* Typography */
+  --vr-text-primary: rgba(255, 255, 255, 0.92);
+  --vr-text-secondary: rgba(255, 255, 255, 0.55);
+  --vr-text-tertiary: rgba(255, 255, 255, 0.30);
+
+  /* Borders */
+  --vr-border: rgba(255, 255, 255, 0.08);
+  --vr-border-focus: rgba(14, 165, 233, 0.60);
+
+  /* Shadows */
+  --vr-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.40);
+  --vr-shadow-md: 0 8px 32px rgba(0, 0, 0, 0.50);
+  --vr-shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.60);
+
+  /* Blur */
+  --vr-blur: blur(24px) saturate(180%);
+  --vr-blur-sm: blur(12px) saturate(150%);
+
+  /* Radius */
+  --vr-radius-sm: 8px;
+  --vr-radius-md: 12px;
+  --vr-radius-lg: 20px;
+  --vr-radius-xl: 28px;
+  --vr-radius-pill: 9999px;
+
+  /* Animation */
+  --vr-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --vr-ease-fast: cubic-bezier(0.4, 0, 0.2, 1);
+  --vr-duration-fast: 120ms;
+  --vr-duration-base: 220ms;
+  --vr-duration-slow: 400ms;
+
+  /* Fonts */
+  --vr-font-sans: -apple-system, "SF Pro Display", "Inter", system-ui, sans-serif;
+  --vr-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", monospace;
+  --vr-font-display: -apple-system, "SF Pro Rounded", "Nunito", system-ui, sans-serif;
+}
+
+/* Dark mode defaults */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-family: var(--vr-font-sans);
+  background: linear-gradient(135deg, #020617 0%, #0f172a 50%, #1e293b 100%);
+  color: var(--vr-text-primary);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Utility classes */
+.vr-glass {
+  background: var(--vr-bg-glass);
+  backdrop-filter: var(--vr-blur);
+  -webkit-backdrop-filter: var(--vr-blur);
+}
+
+.vr-card {
+  background: var(--vr-bg-elevated);
+  border: 1px solid var(--vr-border);
+  border-radius: var(--vr-radius-lg);
+  box-shadow: var(--vr-shadow-md);
+}
+
+.vr-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border: none;
+  border-radius: var(--vr-radius-md);
+  cursor: pointer;
+  transition: all var(--vr-duration-base) var(--vr-ease);
+}
+
+.vr-button-primary {
+  background: linear-gradient(135deg, var(--vr-accent), #2563eb);
+  color: white;
+}
+
+.vr-button-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--vr-shadow-md), 0 0 20px var(--vr-accent-glow);
+}
+
+.vr-button-secondary {
+  background: var(--vr-bg-glass);
+  color: var(--vr-text-primary);
+  border: 1px solid var(--vr-border);
+}
+
+.vr-button-secondary:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.vr-input {
+  width: 100%;
+  padding: 0.875rem 1rem;
+  font-size: 1rem;
+  font-family: inherit;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid var(--vr-border);
+  border-radius: var(--vr-radius-md);
+  color: var(--vr-text-primary);
+  transition: all 0.2s;
+  box-sizing: border-box;
+}
+
+.vr-input:focus {
+  outline: none;
+  border-color: var(--vr-accent);
+  box-shadow: 0 0 0 3px var(--vr-accent-glow);
+}
+
+.vr-input::placeholder {
+  color: var(--vr-text-tertiary);
+}
+
+/* Spinner */
+.vr-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: vr-spin 0.6s linear infinite;
+}
+
+@keyframes vr-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Status indicators */
+.vr-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vr-text-tertiary);
+}
+
+.vr-status-dot.connected {
+  background: var(--vr-success);
+  box-shadow: 0 0 8px var(--vr-success);
+}
+
+.vr-status-dot.error {
+  background: var(--vr-danger);
+  box-shadow: 0 0 8px var(--vr-danger);
+}
+
+.vr-status-dot.connecting {
+  background: var(--vr-warning);
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}

@@ -3,11 +3,11 @@
 //! Handles remote mouse and keyboard input simulation
 //! with cross-platform support.
 
-use enigo::{Enigo, Key, Keyboard, Mouse, Button, Coordinate, Direction, Axis};
-use tracing::{info, debug};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse};
 use std::sync::{Arc, Mutex};
+use tracing::{debug, info};
 
-use crate::error::{VibeResult, VibeError};
+use crate::error::{VibeError, VibeResult};
 
 /// Mouse event types
 #[derive(Debug, Clone)]
@@ -43,19 +43,19 @@ pub enum VirtualKey {
     Backspace,
     Escape,
     Space,
-    
+
     // Modifier keys
     Shift,
     Control,
     Alt,
     Meta, // Command on Mac, Windows on Win
-    
+
     // Arrow keys
     ArrowUp,
     ArrowDown,
     ArrowLeft,
     ArrowRight,
-    
+
     // Navigation
     Home,
     End,
@@ -63,18 +63,28 @@ pub enum VirtualKey {
     PageDown,
     Delete,
     Insert,
-    
+
     // Function keys
-    F1, F2, F3, F4, F5, F6,
-    F7, F8, F9, F10, F11, F12,
-    
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+
     // Regular characters
     Character(char),
 }
 
 impl VirtualKey {
     /// Parse a key string to VirtualKey
-    pub fn from_str(key: &str) -> Option<Self> {
+    pub fn parse_str(key: &str) -> Option<Self> {
         match key.to_lowercase().as_str() {
             "return" | "enter" => Some(VirtualKey::Return),
             "tab" => Some(VirtualKey::Tab),
@@ -123,24 +133,39 @@ impl InputHandler {
     /// Create a new input handler
     pub fn new() -> VibeResult<Self> {
         info!("Initializing input handler");
-        
-        let enigo = Enigo::new(&enigo::Settings::default())
-            .map_err(|e| VibeError::Input(format!("Failed to initialize enigo: {}", e)))?;
 
-        Ok(Self { 
+        // Initialize enigo - will fail with clear error if Accessibility not granted
+        let enigo = Enigo::new(&enigo::Settings::default())
+            .map_err(|e| {
+                let err_msg = e.to_string();
+                if err_msg.contains("permission") || err_msg.contains("ACCESSIBILITY") || err_msg.contains("access") {
+                    let _ = std::process::Command::new("open")
+                        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                        .spawn();
+                    VibeError::Input("Accessibility permission required. Please grant access in System Settings > Privacy & Security > Accessibility".to_string())
+                } else {
+                    VibeError::Input(format!("Input initialization failed: {}", err_msg))
+                }
+            })?;
+
+        Ok(Self {
+            #[allow(clippy::arc_with_non_send_sync)]
             enigo: Arc::new(Mutex::new(enigo)),
         })
     }
 
     /// Handle a mouse event
     pub fn handle_mouse_event(&self, event: MouseEvent) -> VibeResult<()> {
-        let mut enigo = self.enigo.lock()
+        let mut enigo = self
+            .enigo
+            .lock()
             .map_err(|e| VibeError::Input(format!("Failed to lock enigo: {}", e)))?;
-        
+
         match event {
             MouseEvent::Move { x, y } => {
                 debug!("Mouse move to ({}, {})", x, y);
-                enigo.move_mouse(x, y, Coordinate::Abs)
+                enigo
+                    .move_mouse(x, y, Coordinate::Abs)
                     .map_err(|e| VibeError::Input(format!("Mouse move failed: {}", e)))?;
             }
             MouseEvent::Down { button } => {
@@ -150,7 +175,8 @@ impl InputHandler {
                     MouseButton::Right => Button::Right,
                     MouseButton::Middle => Button::Middle,
                 };
-                enigo.button(btn, Direction::Press)
+                enigo
+                    .button(btn, Direction::Press)
                     .map_err(|e| VibeError::Input(format!("Mouse down failed: {}", e)))?;
             }
             MouseEvent::Up { button } => {
@@ -160,12 +186,14 @@ impl InputHandler {
                     MouseButton::Right => Button::Right,
                     MouseButton::Middle => Button::Middle,
                 };
-                enigo.button(btn, Direction::Release)
+                enigo
+                    .button(btn, Direction::Release)
                     .map_err(|e| VibeError::Input(format!("Mouse up failed: {}", e)))?;
             }
             MouseEvent::Wheel { delta } => {
                 debug!("Mouse wheel: {}", delta);
-                enigo.scroll(delta, Axis::Vertical)
+                enigo
+                    .scroll(delta, Axis::Vertical)
                     .map_err(|e| VibeError::Input(format!("Scroll failed: {}", e)))?;
             }
         }
@@ -174,27 +202,32 @@ impl InputHandler {
 
     /// Handle a keyboard event
     pub fn handle_keyboard_event(&self, event: KeyboardEvent) -> VibeResult<()> {
-        let mut enigo = self.enigo.lock()
+        let mut enigo = self
+            .enigo
+            .lock()
             .map_err(|e| VibeError::Input(format!("Failed to lock enigo: {}", e)))?;
-        
+
         match event {
             KeyboardEvent::KeyDown { key } => {
                 debug!("Key down: {:?}", key);
                 if let Some(k) = Self::virtual_key_to_enigo(&key) {
-                    enigo.key(k, Direction::Press)
+                    enigo
+                        .key(k, Direction::Press)
                         .map_err(|e| VibeError::Input(format!("Key down failed: {}", e)))?;
                 }
             }
             KeyboardEvent::KeyUp { key } => {
                 debug!("Key up: {:?}", key);
                 if let Some(k) = Self::virtual_key_to_enigo(&key) {
-                    enigo.key(k, Direction::Release)
+                    enigo
+                        .key(k, Direction::Release)
                         .map_err(|e| VibeError::Input(format!("Key up failed: {}", e)))?;
                 }
             }
             KeyboardEvent::Text { text } => {
                 debug!("Text input: {}", text);
-                enigo.text(&text)
+                enigo
+                    .text(&text)
                     .map_err(|e| VibeError::Input(format!("Text input failed: {}", e)))?;
             }
         }

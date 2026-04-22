@@ -3,24 +3,37 @@
 //! Coordinates frame capture, encoding, and QUIC transmission
 //! along with remote input injection, auto-reconnect, file transfer, and clipboard sync.
 
+use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::mpsc;
-use tracing::{info, error, debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::capture::CapturedFrame;
 use crate::encoder::FrameEncoder;
+use crate::input::{InputHandler, KeyboardEvent, MouseButton, MouseEvent, VirtualKey};
 use crate::transport::QuicTransport;
-use crate::input::{InputHandler, MouseEvent, MouseButton, KeyboardEvent, VirtualKey};
 
 /// Reconnection state machine
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ReconnectState {
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ReconnectState {
+    #[default]
     Disconnected,
     Connecting,
     Connected,
-    Reconnecting { attempt: u32 },
+Reconnecting { attempt: u32 },
+}
+
+impl fmt::Display for ReconnectState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReconnectState::Disconnected => write!(f, "disconnected"),
+            ReconnectState::Connecting => write!(f, "connecting"),
+            ReconnectState::Connected => write!(f, "connected"),
+            ReconnectState::Reconnecting { attempt } => write!(f, "reconnecting_{}", attempt),
+        }
+    }
 }
 
 /// Reconnection configuration
@@ -51,7 +64,7 @@ pub struct SessionState {
     pub inputs_received: Arc<AtomicU64>,
     pub bytes_received: Arc<AtomicU64>,
     reconnect_state: Arc<Mutex<ReconnectState>>,
-    reconnect_config: ReconnectConfig,
+    pub reconnect_config: Arc<Mutex<ReconnectConfig>>,
 }
 
 impl Clone for SessionState {
@@ -77,7 +90,7 @@ impl Default for SessionState {
             inputs_received: Arc::new(AtomicU64::new(0)),
             bytes_received: Arc::new(AtomicU64::new(0)),
             reconnect_state: Arc::new(Mutex::new(ReconnectState::Disconnected)),
-            reconnect_config: ReconnectConfig::default(),
+            reconnect_config: Arc::new(Mutex::new(ReconnectConfig::default())),
         }
     }
 }
@@ -85,15 +98,16 @@ impl Default for SessionState {
 impl SessionState {
     /// Set reconnect configuration
     pub fn set_reconnect_config(&self, config: ReconnectConfig) {
-        let _state = self.reconnect_state.lock().unwrap();
-        // Store config separately - for simplicity we use the default
-        let _ = config;
+        if let Ok(mut guard) = self.reconnect_config.lock() {
+            *guard = config;
+        }
     }
 
     /// Get current connection status
     pub fn is_connected(&self) -> bool {
-        let state = self.reconnect_state.lock().unwrap();
-        *state == ReconnectState::Connected
+        self.reconnect_state.lock()
+            .map(|g| *g == ReconnectState::Connected)
+            .unwrap_or(false)
     }
 
     /// Get session statistics
@@ -105,6 +119,29 @@ impl SessionState {
             inputs_received: self.inputs_received.load(Ordering::Relaxed),
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
         }
+    }
+
+    /// Stop session gracefully
+    pub fn stop(&self) {
+        info!("Stopping session gracefully");
+        self.is_active.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.reconnect_state.lock() {
+            *guard = ReconnectState::Disconnected;
+        }
+    }
+
+    /// Check if reconnection should be attempted
+    pub fn should_reconnect(&self) -> bool {
+        self.reconnect_config.lock()
+            .map(|g| g.max_attempts > 0)
+            .unwrap_or(false)
+    }
+
+    /// Get current reconnect state
+    pub fn get_reconnect_state(&self) -> ReconnectState {
+        self.reconnect_state.lock()
+            .map(|g| *g)
+            .unwrap_or(ReconnectState::Disconnected)
     }
 }
 
@@ -118,6 +155,7 @@ pub struct SessionStats {
 }
 
 /// Auto-reconnecting connection manager
+#[derive(Clone)]
 pub struct ConnectionManager {
     session: SessionState,
 }
@@ -128,22 +166,24 @@ impl ConnectionManager {
     }
 
     /// Attempt to connect with automatic retries
-    pub async fn connect_with_retries<F, Fut, T>(
-        &self,
-        connect_fn: F,
-    ) -> Result<T, String>
+    pub async fn connect_with_retries<F, Fut, T>(&self, connect_fn: F) -> Result<T, String>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, String>>,
     {
-        let config = &self.session.reconnect_config;
-        let mut delay_ms = config.initial_delay_ms;
+        // Clone config values before entering async context
+        let (mut delay_ms, max_attempts, max_delay_ms, backoff_multiplier) = {
+            let config = self.session.reconnect_config.lock()
+                .map_err(|_| "Failed to lock reconnect_config")?;
+            (config.initial_delay_ms, config.max_attempts, config.max_delay_ms, config.backoff_multiplier)
+        };
 
-        for attempt in 1..=config.max_attempts {
-            debug!("Connection attempt {}/{}", attempt, config.max_attempts);
-            
+        for attempt in 1..=max_attempts {
+            debug!("Connection attempt {}/{}", attempt, max_attempts);
+
             {
-                let mut state = self.session.reconnect_state.lock().unwrap();
+                let mut state = self.session.reconnect_state.lock()
+            .map_err(|_| "Failed to lock reconnect_state")?;
                 if attempt == 1 {
                     *state = ReconnectState::Connecting;
                 } else {
@@ -153,34 +193,37 @@ impl ConnectionManager {
 
             match connect_fn().await {
                 Ok(result) => {
-                    let mut state = self.session.reconnect_state.lock().unwrap();
+                    let mut state = self.session.reconnect_state.lock()
+            .map_err(|_| "Failed to lock reconnect_state")?;
                     *state = ReconnectState::Connected;
                     info!("Connection established on attempt {}", attempt);
                     return Ok(result);
                 }
                 Err(e) => {
                     warn!("Connection attempt {} failed: {}", attempt, e);
-                    if attempt < config.max_attempts {
+                    if attempt < max_attempts {
                         debug!("Retrying in {}ms", delay_ms);
                         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                        delay_ms = (delay_ms as f32 * config.backoff_multiplier) as u64;
-                        delay_ms = delay_ms.min(config.max_delay_ms);
+                        delay_ms = (delay_ms as f32 * backoff_multiplier) as u64;
+                        delay_ms = delay_ms.min(max_delay_ms);
                     }
                 }
             }
         }
 
-        let mut state = self.session.reconnect_state.lock().unwrap();
+        let mut state = self.session.reconnect_state.lock()
+            .map_err(|_| "Failed to lock reconnect_state")?;
         *state = ReconnectState::Disconnected;
         Err("Connection failed after maximum retries".to_string())
     }
 
     /// Mark connection as lost and start reconnection
     pub fn trigger_reconnect(&self) {
-        let mut state = self.session.reconnect_state.lock().unwrap();
-        if *state == ReconnectState::Connected {
-            *state = ReconnectState::Disconnected;
-            info!("Connection lost, reconnection will be triggered");
+        if let Ok(mut state) = self.session.reconnect_state.lock() {
+            if *state == ReconnectState::Connected {
+                *state = ReconnectState::Disconnected;
+                info!("Connection lost, reconnection will be triggered");
+            }
         }
     }
 }
@@ -205,7 +248,7 @@ pub async fn start_frame_streaming(
 
     let mut frame_count = 0u64;
     let mut last_report = std::time::Instant::now();
-    
+
     // MED-3: Backpressure - drop frames if network is behind
     let mut consecutive_drops = 0u64;
     const MAX_CONSECUTIVE_DROPS: u64 = 30; // Drop connection after 30 consecutive drops
@@ -241,36 +284,46 @@ pub async fn start_frame_streaming(
         });
 
         let json_bytes = serde_json::to_vec(&frame_data).unwrap_or_default();
-        
+
         if let Err(e) = quic.send_data(json_bytes.clone().into()).await {
             debug!("Frame send failed: {}", e);
             consecutive_drops += 1;
-            
+
             // MED-3: Backpressure - drop frames if too many consecutive failures
             if consecutive_drops > MAX_CONSECUTIVE_DROPS {
-                error!("Too many consecutive frame drops ({}), ending session", consecutive_drops);
-                let _reconnect_lock = session.reconnect_state.lock().unwrap();
+                error!(
+                    "Too many consecutive frame drops ({}), ending session",
+                    consecutive_drops
+                );
+                let _reconnect_lock = session.reconnect_state.lock();
                 break;
             }
         } else {
             consecutive_drops = 0; // Reset drop counter on success
             frame_count += 1;
             session.frames_sent.fetch_add(1, Ordering::Relaxed);
-            session.bytes_sent.fetch_add(json_bytes.len() as u64, Ordering::Relaxed);
+            session
+                .bytes_sent
+                .fetch_add(json_bytes.len() as u64, Ordering::Relaxed);
         }
 
         // Report stats every 100 frames
         if frame_count % 100 == 0 {
             let elapsed = last_report.elapsed();
             let fps = 100.0 / elapsed.as_secs_f64();
-            debug!("Streaming stats: {} fps, {} frames total, {} consecutive drops", 
-                   fps, frame_count, consecutive_drops);
+            debug!(
+                "Streaming stats: {} fps, {} frames total, {} consecutive drops",
+                fps, frame_count, consecutive_drops
+            );
             last_report = std::time::Instant::now();
         }
     }
 
     session.is_active.store(false, Ordering::SeqCst);
-    info!("Frame streaming session ended ({} frames sent)", frame_count);
+    info!(
+        "Frame streaming session ended ({} frames sent)",
+        frame_count
+    );
 }
 
 /// Handle remote input events and inject them
@@ -279,12 +332,12 @@ pub async fn handle_remote_input(
     input_handler: Arc<std::sync::Mutex<InputHandler>>,
     session: SessionState,
 ) -> Result<(), String> {
-    let event_type = input_data["type"].as_str()
-        .ok_or("Missing event type")?;
+    let event_type = input_data["type"].as_str().ok_or("Missing event type")?;
 
     match event_type {
         "mouse" => {
-            let mouse_type = input_data["mouse_type"].as_str()
+            let mouse_type = input_data["mouse_type"]
+                .as_str()
                 .ok_or("Missing mouse type")?;
             let x = input_data["x"].as_i64().unwrap_or(0) as i32;
             let y = input_data["y"].as_i64().unwrap_or(0) as i32;
@@ -312,16 +365,16 @@ pub async fn handle_remote_input(
             };
 
             let handler = input_handler.lock().map_err(|e| e.to_string())?;
-            handler.handle_mouse_event(event).map_err(|e| e.to_string())?;
+            handler
+                .handle_mouse_event(event)
+                .map_err(|e| e.to_string())?;
         }
         "keyboard" => {
-            let key_type = input_data["key_type"].as_str()
-                .ok_or("Missing key type")?;
-            let key_str = input_data["key"].as_str()
-                .ok_or("Missing key")?;
+            let key_type = input_data["key_type"].as_str().ok_or("Missing key type")?;
+            let key_str = input_data["key"].as_str().ok_or("Missing key")?;
 
-            let vk = VirtualKey::from_str(key_str)
-                .ok_or_else(|| format!("Unknown key: {}", key_str))?;
+            let vk =
+                VirtualKey::parse_str(key_str).ok_or_else(|| format!("Unknown key: {}", key_str))?;
 
             let event = match key_type {
                 "down" => KeyboardEvent::KeyDown { key: vk },
@@ -330,10 +383,13 @@ pub async fn handle_remote_input(
             };
 
             let handler = input_handler.lock().map_err(|e| e.to_string())?;
-            handler.handle_keyboard_event(event).map_err(|e| e.to_string())?;
+            handler
+                .handle_keyboard_event(event)
+                .map_err(|e| e.to_string())?;
         }
         "clipboard" => {
-            let text = input_data["text"].as_str()
+            let text = input_data["text"]
+                .as_str()
                 .ok_or("Missing clipboard text")?;
             debug!("Remote clipboard update: {} chars", text.len());
             // In a full implementation, you'd set the system clipboard here
@@ -355,39 +411,16 @@ pub async fn handle_file_transfer(
     _stream: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
     file_info: FileInfo,
 ) -> Result<String, String> {
-    info!("Receiving file: {} ({} bytes)", file_info.name, file_info.size);
+    info!(
+        "Receiving file: {} ({} bytes)",
+        file_info.name, file_info.size
+    );
     // In a full implementation, this would write chunks to disk
     Ok(format!("File received: {}", file_info.name))
 }
 
-/// Simple base64 encoding
+/// Simple base64 encoding using the base64 crate
 fn base64_encode(data: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut result = String::with_capacity(data.len() * 4 / 3);
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        
-        write!(result, "{}", CHARS[(triple >> 18) as usize] as char).unwrap();
-        write!(result, "{}", CHARS[((triple >> 12) & 0x3F) as usize] as char).unwrap();
-        
-        if chunk.len() > 1 {
-            write!(result, "{}", CHARS[((triple >> 6) & 0x3F) as usize] as char).unwrap();
-        } else {
-            result.push('=');
-        }
-        
-        if chunk.len() > 2 {
-            write!(result, "{}", CHARS[(triple & 0x3F) as usize] as char).unwrap();
-        } else {
-            result.push('=');
-        }
-    }
-    
-    result
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    BASE64.encode(data)
 }

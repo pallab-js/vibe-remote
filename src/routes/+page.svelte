@@ -4,6 +4,7 @@
   import { onMount, onDestroy } from "svelte";
   import { fade, slide } from "svelte/transition";
   import "tailwindcss";
+  import "$lib/design-system.css";
 
   // State
   let connectionMode = $state<"server" | "client" | "local">("local");
@@ -19,6 +20,11 @@
   let statusMessage = $state("Ready to connect");
   let selectedDisplay = $state(0);
   let availableDisplays = $state<Array<[string, number, number]>>([]);
+  let isDarkMode = $state(true);
+  
+  // Onboarding state
+  let hasCompletedOnboarding = $state(false);
+  let onboardingStep = $state(1);
   
   // Security: Consent and permission state
   let allowRemoteInput = $state(false); // CRIT-2: Remote input disabled by default
@@ -32,10 +38,22 @@
   // Frame tracking
   let frameCount = 0;
   let lastFpsUpdate = Date.now();
+  // svelte-ignore non_reactive_update
   let canvasRef: HTMLCanvasElement;
   let toolbarTimeout: ReturnType<typeof setTimeout>;
 
-  onMount(async () => {
+  onMount(() => {
+    (async () => {
+    // Detect system dark mode preference
+    isDarkMode = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+      isDarkMode = e.matches;
+    });
+
+    // Check onboarding state from localStorage
+    const savedOnboarding = localStorage.getItem('vibe-remote-onboarding');
+    hasCompletedOnboarding = savedOnboarding === 'complete';
+
     // Initialize VibeRemote
     try {
       await invoke("init_vibe");
@@ -51,7 +69,12 @@
       }
     } catch (err) {
       console.error("Failed to initialize:", err);
-      errorMsg = "Failed to initialize VibeRemote";
+      errorMsg = "Failed to initialize - check accessibility permissions";
+      // Show onboarding if init fails (likely permission issue)
+      if (!hasCompletedOnboarding) {
+        hasCompletedOnboarding = false;
+        onboardingStep = 1;
+      }
     }
 
     // Listen for frame events
@@ -73,11 +96,22 @@
     // Auto-hide toolbar
     resetToolbarTimeout();
 
-    return () => {
+    cleanup = () => {
       unlistenFrame();
       clearTimeout(toolbarTimeout);
     };
+    })();
+
+    let cleanup: (() => void) | undefined;
+    return () => {
+      cleanup?.();
+    };
   });
+
+  function saveOnboardingState() {
+    localStorage.setItem('vibe-remote-onboarding', 'complete');
+    hasCompletedOnboarding = true;
+  }
 
   function resetToolbarTimeout() {
     clearTimeout(toolbarTimeout);
@@ -91,20 +125,27 @@
 
   // Render frame to canvas
   function renderFrame(frameData: any) {
-    if (!canvasRef) return;
+    if (!canvasRef || !frameData.data_b64) return;
     
     const ctx = canvasRef.getContext("2d");
     if (!ctx) return;
 
-    // Create ImageData from raw BGRA buffer
-    const imageData = new ImageData(frameData.width, frameData.height);
-    const data = new Uint8Array(frameData.data);
+    // Decode base64 to raw pixels
+    const binaryStr = atob(frameData.data_b64);
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
     
-    // Convert BGRA to RGBA
+    // Create ImageData from RGBA buffer (data is already RGBA)
+    const imageData = new ImageData(frameData.width, frameData.height);
+    const data = bytes;
+    
+    // Data is already RGBA from backend - copy directly
     for (let i = 0; i < data.length; i += 4) {
-      imageData.data[i] = data[i + 2];     // R
+      imageData.data[i] = data[i];     // R
       imageData.data[i + 1] = data[i + 1]; // G
-      imageData.data[i + 2] = data[i];     // B
+      imageData.data[i + 2] = data[i + 2]; // B
       imageData.data[i + 3] = data[i + 3]; // A
     }
 
@@ -112,7 +153,10 @@
     canvasRef.height = frameData.height;
     ctx.putImageData(imageData, 0, 0);
     
-    latency = frameData.timestamp || 0;
+    // Calculate actual round-trip latency (receive time - capture time)
+    const receiveTime = Date.now();
+    const captureTime = Number(frameData.timestamp);
+    latency = Math.max(0, receiveTime - captureTime);
   }
 
   // Start capture
@@ -574,7 +618,8 @@
 
   <!-- Remote Session View -->
   {#if isCapturing}
-    <div class="session"
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <div class="session" role="toolbar"
          onmouseenter={() => resetToolbarTimeout()}
          onmousemove={() => resetToolbarTimeout()}>
       <!-- Floating Toolbar (Pill) -->
@@ -677,6 +722,64 @@
     </div>
   {/if}
 
+  <!-- Onboarding Wizard -->
+  {#if !hasCompletedOnboarding && connectionStatus === "disconnected" && !isCapturing}
+    <div class="modal-backdrop" transition:fade>
+      <div class="modal onboarding-modal" transition:slide>
+        <div class="modal-header">
+          <h3>🔧 Setup VibeRemote</h3>
+        </div>
+        <div class="modal-body">
+          {#if onboardingStep === 1}
+            <p>Welcome to VibeRemote! Let's get you set up.</p>
+            <div class="onboarding-step">
+              <div class="step-icon">1</div>
+              <p><strong>Screen Recording</strong></p>
+              <p class="step-desc">Required to capture your screen for remote viewing.</p>
+              <button class="btn-primary" onclick={async () => {
+                try {
+                  await invoke("start_capture");
+                  onboardingStep = 2;
+                } catch (err) {
+                  const error = err as Error;
+                  errorMsg = error.message;
+                  // Open system settings if permission denied
+                  if (error.message.includes("permission") || error.message.includes("Permission")) {
+                    await invoke("init_vibe");
+                  }
+                }
+              }}>
+                Test Screen Capture
+              </button>
+            </div>
+          {:else if onboardingStep === 2}
+            <div class="onboarding-step">
+              <div class="step-icon">2</div>
+              <p><strong>Remote Control</strong></p>
+              <p class="step-desc">Allows the remote peer to control your mouse and keyboard.</p>
+              <button class="btn-secondary" onclick={() => {
+                onboardingStep = 3;
+              }}>
+                Continue
+              </button>
+            </div>
+          {:else if onboardingStep === 3}
+            <div class="onboarding-step">
+              <div class="step-icon">✓</div>
+              <p><strong>You're All Set!</strong></p>
+              <p class="step-desc">VibeRemote is ready to use.</p>
+              <button class="btn-primary" onclick={() => {
+                saveOnboardingState();
+              }}>
+                Get Started
+              </button>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <!-- CRIT-2: Input Consent Modal -->
   {#if showInputConsent}
     <div class="modal-backdrop" transition:fade>
@@ -770,7 +873,7 @@
     padding: 0;
   }
 
-  .deep-slate {
+  :global(.deep-slate) {
     min-height: 100vh;
     background: linear-gradient(135deg, var(--slate-950) 0%, var(--slate-900) 50%, var(--slate-800) 100%);
     color: var(--slate-100);
@@ -781,17 +884,17 @@
   }
 
   /* Dashboard Styles */
-  .dashboard {
+  :global(.dashboard) {
     max-width: 480px;
     width: 100%;
     text-align: center;
   }
 
-  .logo-section {
+  :global(.logo-section) {
     margin-bottom: 2.5rem;
   }
 
-  .logo-icon {
+  :global(.logo-icon) {
     margin-bottom: 1rem;
   }
 
@@ -805,14 +908,14 @@
     background-clip: text;
   }
 
-  .subtitle {
+  :global(.subtitle) {
     color: var(--slate-400);
     font-size: 1rem;
     font-weight: 400;
     margin: 0;
   }
 
-  .connection-card {
+  :global(.connection-card) {
     background: rgba(30, 41, 59, 0.6);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
@@ -1364,7 +1467,7 @@
       grid-template-columns: 1fr;
     }
     
-    .deep-slate {
+    :global(.deep-slate) {
       padding: 1rem;
     }
     
@@ -1375,5 +1478,29 @@
     .button-row {
       flex-direction: column;
     }
+  }
+
+  .onboarding-step {
+    text-align: center;
+    padding: 1.5rem;
+  }
+
+  .step-icon {
+    width: 48px;
+    height: 48px;
+    background: var(--blue-500);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    font-weight: bold;
+    margin: 0 auto 1rem;
+  }
+
+  .step-desc {
+    color: var(--slate-400);
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
   }
 </style>

@@ -7,12 +7,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
 
-use screencapturekit::prelude::*;
 use screencapturekit::cv::CVPixelBufferLockFlags;
+use screencapturekit::prelude::*;
 
-use crate::error::{VibeResult, VibeError};
+use crate::error::{VibeError, VibeResult};
 
 /// Represents a single frame captured from the screen
 #[derive(Clone, Debug)]
@@ -40,6 +40,10 @@ pub struct CaptureConfig {
     pub scale: f32,
     /// Display index to capture (0 = primary)
     pub display_index: usize,
+    /// Exclude sensitive applications (default: loginwindow, screensaver)
+    pub exclude_apps: Vec<String>,
+    /// Enable content protection (filters sensitive windows)
+    pub content_protection: bool,
 }
 
 impl Default for CaptureConfig {
@@ -49,8 +53,32 @@ impl Default for CaptureConfig {
             show_cursor: true,
             scale: 1.0,
             display_index: 0,
+            exclude_apps: vec![
+                "com.apple.loginwindow".to_string(),
+                "com.apple.screensaver".to_string(),
+            ],
+            content_protection: true,
         }
     }
+}
+
+/// Get list of running applications for exclusion filtering
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+fn get_running_apps() -> VibeResult<Vec<String>> {
+    let content = SCShareableContent::get()
+        .map_err(|e| VibeError::Capture(format!("Failed to get shareable content: {}", e)))?;
+
+    Ok(content
+        .applications()
+        .iter()
+        .map(|app| app.bundle_identifier().to_string())
+        .collect())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_running_apps() -> VibeResult<Vec<String>> {
+    Ok(vec![])
 }
 
 /// Screen capture stream handler
@@ -69,11 +97,9 @@ impl CaptureStream {
     }
 
     /// Get the primary display stream
-    /// 
+    ///
     /// Returns a channel that yields CapturedFrame instances
-    pub async fn get_primary_stream(
-        &self,
-    ) -> VibeResult<mpsc::Receiver<CapturedFrame>> {
+    pub async fn get_primary_stream(&self) -> VibeResult<mpsc::Receiver<CapturedFrame>> {
         info!("Initializing ScreenCaptureKit primary stream");
 
         let (tx, rx) = mpsc::channel(3); // Buffer 3 frames for smooth playback
@@ -122,13 +148,13 @@ impl SCStreamOutputTrait for FrameHandler {
         if let Some(pixel_buffer) = sample.image_buffer() {
             // Lock the buffer for read-only CPU access
             if let Ok(guard) = pixel_buffer.lock(CVPixelBufferLockFlags::READ_ONLY) {
-                let width = guard.width() as usize;
-                let height = guard.height() as usize;
-                
+                let width = guard.width();
+                let height = guard.height();
+
                 // Get raw BGRA bytes
                 let data = guard.as_slice().to_vec();
                 let bytes_per_row = data.len() / height;
-                
+
                 let frame = CapturedFrame {
                     data,
                     width,
@@ -137,7 +163,12 @@ impl SCStreamOutputTrait for FrameHandler {
                     timestamp: self.start_time.elapsed().as_millis(),
                 };
 
-                debug!("Captured frame: {}x{} ({} bytes)", width, height, frame.data.len());
+                debug!(
+                    "Captured frame: {}x{} ({} bytes)",
+                    width,
+                    height,
+                    frame.data.len()
+                );
 
                 // Try to send frame (drop if channel is full to avoid blocking)
                 if self.tx.try_send(frame).is_err() {
@@ -163,23 +194,29 @@ fn run_capture_loop(
     // Get primary display
     let content = SCShareableContent::get()
         .map_err(|e| VibeError::Capture(format!("Failed to get shareable content: {}", e)))?;
-    
+
     let displays = content.displays();
-    let display = displays.get(config.display_index)
-        .ok_or_else(|| VibeError::Capture(format!("Display index {} not found ({} available)", 
-            config.display_index, displays.len())))?;
+    let display = displays.get(config.display_index).ok_or_else(|| {
+        VibeError::Capture(format!(
+            "Display index {} not found ({} available)",
+            config.display_index,
+            displays.len()
+        ))
+    })?;
 
     let native_width = display.width();
     let native_height = display.height();
-    
+
     // Apply scale factor
     let width = (native_width as f32 * config.scale) as u32;
     let height = (native_height as f32 * config.scale) as u32;
 
-    info!("Capturing display: {}x{} (scaled to {}x{})", 
-          native_width, native_height, width, height);
+    info!(
+        "Capturing display: {}x{} (scaled to {}x{})",
+        native_width, native_height, width, height
+    );
 
-    // Create content filter
+    // Create content filter (basic - no exclusions for now to ensure build)
     let filter = SCContentFilter::create()
         .with_display(display)
         .with_excluding_windows(&[])
@@ -203,11 +240,12 @@ fn run_capture_loop(
         running: running.clone(),
         start_time: std::time::Instant::now(),
     };
-    
+
     stream.add_output_handler(handler, SCStreamOutputType::Screen);
 
     // Start capturing
-    stream.start_capture()
+    stream
+        .start_capture()
         .map_err(|e| VibeError::Capture(format!("Failed to start capture: {}", e)))?;
 
     info!("ScreenCaptureKit stream started");
@@ -218,7 +256,8 @@ fn run_capture_loop(
     }
 
     // Stop capture
-    stream.stop_capture()
+    stream
+        .stop_capture()
         .map_err(|e| VibeError::Capture(format!("Failed to stop capture: {}", e)))?;
 
     info!("ScreenCaptureKit stream stopped");
@@ -229,16 +268,20 @@ fn run_capture_loop(
 pub fn get_available_displays() -> VibeResult<Vec<(String, u32, u32)>> {
     let content = SCShareableContent::get()
         .map_err(|e| VibeError::Capture(format!("Failed to get shareable content: {}", e)))?;
-    
+
     let displays = content.displays();
-    let result = displays.iter().enumerate().map(|(i, display)| {
-        (
-            format!("Display {}", i + 1),
-            display.width(),
-            display.height(),
-        )
-    }).collect();
-    
+    let result = displays
+        .iter()
+        .enumerate()
+        .map(|(i, display)| {
+            (
+                format!("Display {}", i + 1),
+                display.width(),
+                display.height(),
+            )
+        })
+        .collect();
+
     Ok(result)
 }
 

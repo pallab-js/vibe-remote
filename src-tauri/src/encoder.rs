@@ -4,14 +4,14 @@
 //! and delta encoding for reduced bandwidth.
 //! Uses buffer pooling to minimize allocations.
 
-use std::io::Cursor;
-use image::{ImageBuffer, Rgba, ImageFormat};
-use flate2::read::ZlibEncoder;
 use flate2::Compression;
-use std::io::Read;
+use flate2::read::ZlibEncoder;
+use image::{ImageBuffer, ImageFormat, Rgb};
 use std::collections::VecDeque;
+use std::io::Cursor;
+use std::io::Read;
 
-use crate::error::{VibeResult, VibeError};
+use crate::error::{VibeError, VibeResult};
 
 /// Reusable buffer pool to minimize allocations
 pub struct BufferPool {
@@ -75,6 +75,7 @@ pub enum FrameType {
 
 /// Frame encoder with compression
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct FrameEncoder {
     /// Current sequence number
     sequence: u64,
@@ -101,7 +102,13 @@ impl FrameEncoder {
     }
 
     /// Encode a raw frame for network transmission
-    pub fn encode_frame(&mut self, data: &[u8], width: usize, height: usize, timestamp: u128) -> VibeResult<EncodedFrame> {
+    pub fn encode_frame(
+        &mut self,
+        data: &[u8],
+        width: usize,
+        height: usize,
+        timestamp: u128,
+    ) -> VibeResult<EncodedFrame> {
         let scaled_width = (width as f32 * self.scale) as u32;
         let scaled_height = (height as f32 * self.scale) as u32;
 
@@ -122,34 +129,54 @@ impl FrameEncoder {
             height: scaled_height,
             sequence: self.sequence,
             timestamp,
-            frame_type: if is_keyframe { FrameType::KeyFrame } else { FrameType::DeltaFrame },
+            frame_type: if is_keyframe {
+                FrameType::KeyFrame
+            } else {
+                FrameType::DeltaFrame
+            },
         };
 
         self.sequence += 1;
-        
+
         Ok(frame)
     }
 
     /// Encode as full JPEG frame
-    fn encode_jpeg_frame(&mut self, data: &[u8], width: usize, height: usize) -> VibeResult<Vec<u8>> {
+    fn encode_jpeg_frame(
+        &mut self,
+        data: &[u8],
+        width: usize,
+        height: usize,
+    ) -> VibeResult<Vec<u8>> {
         // Convert BGRA to RGBA
         let mut rgba_data = vec![0u8; data.len()];
         for i in (0..data.len()).step_by(4) {
-            rgba_data[i] = data[i + 2];     // R
+            rgba_data[i] = data[i + 2]; // R
             rgba_data[i + 1] = data[i + 1]; // G
-            rgba_data[i + 2] = data[i];     // B
+            rgba_data[i + 2] = data[i]; // B
             rgba_data[i + 3] = data[i + 3]; // A
         }
 
+        // Convert RGBA to RGB (JPEG doesn't support RGBA)
+        let rgb_data: Vec<u8> = rgba_data
+            .chunks(4)
+            .flat_map(|chunk| vec![chunk[0], chunk[1], chunk[2]])
+            .collect();
+
         // Create image buffer
-        let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width as u32, height as u32, rgba_data)
+        let img = ImageBuffer::<Rgb<u8>, _>::from_raw(width as u32, height as u32, rgb_data)
             .ok_or_else(|| VibeError::Capture("Failed to create image buffer".to_string()))?;
 
         // Scale if needed
         let img = if self.scale != 1.0 {
             let scaled_width = (width as f32 * self.scale) as u32;
             let scaled_height = (height as f32 * self.scale) as u32;
-            image::imageops::resize(&img, scaled_width, scaled_height, image::imageops::FilterType::Nearest)
+            image::imageops::resize(
+                &img,
+                scaled_width,
+                scaled_height,
+                image::imageops::FilterType::Nearest,
+            )
         } else {
             img
         };
@@ -163,7 +190,8 @@ impl FrameEncoder {
         // Further compress with zlib
         let mut encoder = ZlibEncoder::new(jpeg_data.as_slice(), Compression::fast());
         let mut compressed = Vec::new();
-        encoder.read_to_end(&mut compressed)
+        encoder
+            .read_to_end(&mut compressed)
             .map_err(|e| VibeError::Capture(format!("Zlib compression failed: {}", e)))?;
 
         // Store for delta encoding
@@ -173,12 +201,17 @@ impl FrameEncoder {
     }
 
     /// Encode delta from previous frame
-    fn encode_delta_frame(&mut self, data: &[u8], width: usize, height: usize) -> VibeResult<Vec<u8>> {
+    fn encode_delta_frame(
+        &mut self,
+        data: &[u8],
+        width: usize,
+        height: usize,
+    ) -> VibeResult<Vec<u8>> {
         if let Some(ref prev) = self.previous_frame {
             // Calculate XOR delta
             let mut delta = vec![0u8; data.len()];
             let mut changed_pixels = 0;
-            
+
             for i in 0..data.len() {
                 delta[i] = data[i] ^ prev[i];
                 if delta[i] != 0 {
@@ -195,7 +228,8 @@ impl FrameEncoder {
             // Compress delta
             let mut encoder = ZlibEncoder::new(delta.as_slice(), Compression::fast());
             let mut compressed = Vec::new();
-            encoder.read_to_end(&mut compressed)
+            encoder
+                .read_to_end(&mut compressed)
                 .map_err(|e| VibeError::Capture(format!("Delta compression failed: {}", e)))?;
 
             // Update previous frame
@@ -213,7 +247,8 @@ impl FrameEncoder {
         // Decompress zlib
         let mut decoder = flate2::read::ZlibDecoder::new(encoded.data.as_slice());
         let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)
+        decoder
+            .read_to_end(&mut decompressed)
             .map_err(|e| VibeError::Capture(format!("Zlib decompression failed: {}", e)))?;
 
         // Decode JPEG
@@ -227,9 +262,9 @@ impl FrameEncoder {
         // Convert RGBA to BGRA for display
         let mut bgra_data = vec![0u8; rgba_data.len()];
         for i in (0..rgba_data.len()).step_by(4) {
-            bgra_data[i] = rgba_data[i + 2];     // B
+            bgra_data[i] = rgba_data[i + 2]; // B
             bgra_data[i + 1] = rgba_data[i + 1]; // G
-            bgra_data[i + 2] = rgba_data[i];     // R
+            bgra_data[i + 2] = rgba_data[i]; // R
             bgra_data[i + 3] = rgba_data[i + 3]; // A
         }
 

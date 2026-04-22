@@ -6,12 +6,7 @@ authors = ["you"]
 edition = "2024"
 rust-version = "1.85"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "vibe_remote_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
@@ -19,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -30,7 +25,7 @@ tokio = { version = "1", features = ["full"] }
 # QUIC networking
 quinn = { version = "0.11", features = ["runtime-tokio"] }
 rcgen = "0.13"
-rustls = { version = "0.23", features = ["std"] }
+rustls = { version = "0.23", features = ["std", "ring"] }
 sha2 = "0.10"
 
 # Logging & tracing
@@ -52,15 +47,15 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 flate2 = "1"
 
 # Serialization for IPC
-# Replaced bincode 1.x (unmaintained RUSTSEC-2025-0141) with rmp-serde (MessagePack)
 rmp-serde = "1"
 
-# Time utilities
-chrono = { version = "0.4", features = ["serde"] }
+# Time utilities - using default-features=false to avoid time crate (use chrono instead)
+chrono = { version = "0.4", features = ["serde"], default-features = false }
 
 # Video encoding - Hardware acceleration
 core-video = "0.1"
 core-foundation = "0.9"
+video-toolbox-sys = { version = "0.2", features = ["helpers"] }
 
 # Clipboard sync
 arboard = "3"
@@ -73,7 +68,6 @@ stun = "0.5"
 turn = "0.8"
 
 # Security - Ed25519 + Noise Protocol
-# NOTE: rand 0.8 is required for ed25519-dalek compatibility
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 rand_core = "0.6"
@@ -83,6 +77,9 @@ zeroize = "1"
 
 # Bytes manipulation
 bytes = "1"
+
+# Audio capture
+coreaudio-rs = "0.14"
 
 [profile.release]
 strip = true
@@ -94,4 +91,3 @@ panic = "abort"
 [profile.dev]
 opt-level = 0
 debug = true
-
