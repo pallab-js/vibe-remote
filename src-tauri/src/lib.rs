@@ -309,7 +309,7 @@ async fn start_capture(
             }
 
             // Invariant #1: pixel data is RGBA in transit; ScreenCaptureKit gives BGRA
-            for px in frame.data.chunks_exact_mut(4) {
+            for px in frame.data.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
 
