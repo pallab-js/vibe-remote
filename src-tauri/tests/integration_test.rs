@@ -18,8 +18,7 @@ use vibe_remote_lib::{
     capture::{CaptureConfig, CaptureStream},
     encoder::FrameEncoder,
     input::{InputHandler, KeyboardEvent, MouseEvent, VirtualKey},
-    session::SessionState,
-    transport::{QuicConfig, QuicTransport, create_local_tunnel},
+    transport::create_local_tunnel,
 };
 
 /// Test frame encoding pipeline
@@ -74,6 +73,7 @@ async fn test_frame_encoding_pipeline() {
 
 /// Test input handler functionality
 #[tokio::test]
+#[ignore] // Injects real mouse/keystrokes into the current desktop session
 async fn test_input_handler() {
     let handler = InputHandler::new().expect("Failed to create input handler");
 
@@ -239,14 +239,6 @@ async fn test_peer_identity() {
 
     // Cleanup
     std::fs::remove_file(&key_path).ok();
-}
-
-/// Test NAT traversal STUN discovery
-#[tokio::test]
-async fn test_nat_discovery() {
-    // NOTE: nat_traversal is not yet exported from vibe_remote_lib
-    // This test is skipped for now - the module exists but isn't public
-    println!("NAT traversal test skipped (module not exported)");
 }
 
 /// Benchmark frame encoding performance

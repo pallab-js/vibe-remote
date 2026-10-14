@@ -47,6 +47,12 @@ jobs:
       - name: Run clippy
         run: cd src-tauri && cargo clippy -- -D warnings
       
+      - name: Run tests
+        run: cd src-tauri && cargo test
+      
+      - name: Type-check frontend
+        run: pnpm check
+      
       - name: Build frontend
         run: pnpm build
       
