@@ -1,6 +1,6 @@
 # VibeRemote
 
-**A QUIC-powered, production-ready remote desktop application built with Rust and SvelteKit.**
+**A QUIC-powered remote desktop application built with Rust and SvelteKit.**
 
 [![Rust](https://img.shields.io/badge/rust-1.85+-blue.svg)](https://www.rust-lang.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2.0-blue.svg)](https://tauri.app/)
@@ -10,7 +10,7 @@
 
 ## Overview
 
-VibeRemote is a high-performance remote desktop application that delivers sub-10MB binaries with native macOS screen capture (ScreenCaptureKit), hardware-accelerated encoding, real-time streaming over QUIC with TLS 1.3, Ed25519 identity authentication, and Noise Protocol key exchange.
+VibeRemote is a remote desktop application with native macOS screen capture (ScreenCaptureKit), JPEG compression, real-time streaming over QUIC with TLS 1.3, and Ed25519 identity keys.
 
 **Key differentiators:**
 - **<10MB binary** (vs ~150MB for alternatives)
@@ -24,12 +24,7 @@ VibeRemote is a high-performance remote desktop application that delivers sub-10
 ### Core
 - Native macOS screen capture via ScreenCaptureKit (macOS 13+)
 - QUIC networking with TLS 1.3 encryption (quinn)
-- Custom congestion control tuned for real-time video (BBR-like)
-- JPEG + zlib compression (~40:1 ratio) with delta frames
-- Buffer pool management for optimized memory usage
-- Hardware H.264 encoder infrastructure (VideoToolbox)
-- Adaptive bitrate (500K-8Mbps based on RTT/packet loss)
-- MessagePack binary wire protocol for efficient serialization
+- JPEG + zlib compression with buffer pool management
 - Connection modes: Local (capture), Host (server), Client (viewer)
 
 ### Input & Control
@@ -43,28 +38,23 @@ VibeRemote is a high-performance remote desktop application that delivers sub-10
 - QUIC with TLS 1.3 (native encryption)
 - Certificate pinning (SHA256 fingerprint) + TOFU mode
 - Ed25519 identity system with persistent keypairs
-- Noise Protocol XX handshake infrastructure
 - Backend-enforced consent for remote control and clipboard
 - Rate limiting on all input (100 mouse/sec, 50 keys/sec, 5 clipboard/min)
 - Key storage with 0o600 permissions + memory zeroization
-- Comprehensive audit logging (no user content in logs)
+- Metadata-only audit logging (no user content in logs)
 - Content Security Policy enforcement
 
 ### Networking
 - Server and client modes
-- Auto-reconnection with exponential backoff
-- STUN/TURN NAT traversal
-- ICE candidate gathering
+- Client-side reconnection events with error detection
 - Self-host relay support (see [RELAY_SERVER.md](RELAY_SERVER.md))
 
 ### UI
 - Deep Slate dark theme with glassmorphism and macOS vibrancy effects
 - Svelte 5 runes for reactive state management
 - Auto-hiding floating toolbar (shows/hides after 3 seconds)
-- Real-time FPS and latency display with network vitality sparkline
 - Multi-display selection — lists all available monitors
 - Onboarding wizard — step-by-step setup for new users
-- Connection history with trust levels (trusted/ask/blocked)
 - Consent modals for input and clipboard with security warnings
 
 ## Installation
@@ -112,7 +102,7 @@ Download from [Releases](https://github.com/pallab-js/vibe-remote/releases).
 2. Select **Host** mode
 3. Set port (default: `4567`)
 4. Click **Start Server**
-5. Share your IP and the displayed certificate fingerprint with the client
+5. Share your IP address with the client (see Known Limitations: the certificate fingerprint is not yet shown in the UI)
 
 ### Client (Viewer)
 
@@ -135,41 +125,27 @@ vibe-remote/
 │   ├── routes/
 │   │   └── +page.svelte         # Main dashboard (all UI logic)
 │   ├── lib/
-│   │   ├── components/          # Reusable components
-│   │   │   └── ConnectPanel.svelte
-│   │   ├── stores/              # Svelte 5 runes stores
-│   │   │   ├── settings.svelte.ts
-│   │   │   ├── connection-history.svelte.ts
-│   │   │   └── session.svelte.ts
-│   │   ├── utils/               # Utilities
-│   │   │   └── codec.ts
-│   │   └── design-system.css   # CSS variables + macOS vibrancy
+│   │   └── design-system.css    # CSS variables + macOS vibrancy
 │   ├── app.css                  # Tailwind theme
 │   └── app.html                 # HTML template
 ├── src-tauri/                    # Rust backend
 │   ├── src/
-│   │   ├── lib.rs               # Main library: AppState, 40+ Tauri commands
+│   │   ├── lib.rs               # Main library: AppState, Tauri commands
 │   │   ├── main.rs              # Entry point
 │   │   ├── capture.rs           # ScreenCaptureKit integration
-│   │   ├── capture_windows.rs   # Windows DXGI (conditional compilation)
-│   │   ├── transport.rs        # QUIC server/client + certificate pinning
-│   │   ├── input.rs            # enigo input injection
-│   │   ├── encoder.rs          # JPEG+zlib compression + buffer pool
-│   │   ├── h264_encoder.rs     # Hardware H.264 encoder
-│   │   ├── session.rs          # Session state + auto-reconnect
-│   │   ├── connection.rs       # Connection state machine
-│   │   ├── auth.rs             # Ed25519 + Noise Protocol
-│   │   ├── protocol.rs         # MessagePack binary wire protocol
-│   │   ├── adaptive_bitrate.rs # Network-adaptive quality control
-│   │   ├── nat_traversal.rs    # STUN/TURN implementation
-│   │   ├── audio.rs            # CoreAudio capture (stub)
-│   │   ├── error.rs            # Centralized error types
-│   │   └── logging.rs          # Tracing subscriber
+│   │   ├── transport.rs         # QUIC server/client + certificate pinning
+│   │   ├── input.rs             # enigo input injection
+│   │   ├── encoder.rs           # JPEG+zlib compression + buffer pool
+│   │   ├── session.rs           # Session state + frame streaming
+│   │   ├── auth.rs              # Ed25519 identity
+│   │   ├── protocol.rs          # MessagePack wire types (not yet wired)
+│   │   ├── error.rs             # Centralized error types
+│   │   └── logging.rs           # Tracing subscriber
 │   ├── tests/
-│   │   └── integration_test.rs # Integration tests + benchmarks
-│   └── tauri.conf.json         # Tauri configuration
+│   │   └── integration_test.rs  # Integration tests + benchmarks
+│   └── tauri.conf.json          # Tauri configuration
 └── .github/workflows/
-    └── build.yml               # CI/CD pipeline
+    └── build.yml               # CI/CD pipeline (macOS)
 ```
 
 ## Development
@@ -210,20 +186,33 @@ VIBE_VERBOSE=1 pnpm tauri dev
 Layer 1: Transport      QUIC + TLS 1.3 (native encryption)
 Layer 2: Pinning        SHA256 certificate fingerprint verification
 Layer 3: Identity       Ed25519 keypairs (persistent, 0o600 perms)
-Layer 4: Auth           Noise Protocol XX handshake (infrastructure ready)
-Layer 5: Access Control Backend-enforced consent + rate limiting
-Layer 6: Audit          All security events logged (no user content)
+Layer 4: Access Control Backend-enforced consent + rate limiting
+Layer 5: Audit          Security events logged (no user content)
 ```
 
 See [SECURITY.md](SECURITY.md) for the vulnerability reporting process.
 
+## Known Limitations
+
+Honest status of the current implementation:
+
+- **Video streaming works end-to-end** (capture → JPEG → QUIC → render) but every frame is a full JPEG keyframe; delta frames and adaptive bitrate are not implemented.
+- **Remote input is not delivered over the network yet.** The host streams video out, but incoming QUIC datagrams are not routed to the input handler. Input commands work on the local command path only.
+- **No NAT traversal** — LAN/direct-IP use only.
+- **macOS only.** Windows DXGI capture was never completed; there is no Windows build.
+- **No hardware H.264 encoding** — software JPEG only.
+- **File transfer is not implemented** (commands acknowledge but do nothing).
+- **The server certificate fingerprint is not yet displayed in the UI** — TOFU mode accepts the first certificate seen and logs it.
+
 ## Roadmap
 
-- [ ] Hardware H.264 encoding (VideoToolbox full integration)
-- [ ] Noise Protocol handshake wired into connection flow
-- [ ] Full file transfer implementation
-- [ ] Windows DXGI capture testing
-- [ ] Tauri 3.0 migration (when available)
+- [ ] Deliver remote input over the QUIC data path
+- [ ] Display and verify the server certificate fingerprint in the UI
+- [ ] Delta frames or hardware H.264 encoding for higher FPS at lower bandwidth
+- [ ] Adaptive bitrate wired to real RTT/loss measurements
+- [ ] NAT traversal / relay
+- [ ] File transfer
+- [ ] Windows capture (from scratch)
 
 ## Contributing
 

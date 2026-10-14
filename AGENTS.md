@@ -12,9 +12,9 @@ cargo fmt              # Format Rust
 ## Architecture
 - Frontend: Svelte 5 (runes API)
 - Backend: Tauri v2 + Rust async (Tokio)
-- Transport: QUIC via Quinn + binary MessagePack
+- Transport: QUIC via Quinn (frames currently JSON+base64 over datagrams)
 - Capture: ScreenCaptureKit (macOS 13+)
-- Auth: Ed25519 + Noise Protocol
+- Auth: Ed25519 identity + QUIC/TLS 1.3
 
 ## Key Invariants
 1. All pixel data is RGBA (not BGRA) in transit
@@ -22,17 +22,13 @@ cargo fmt              # Format Rust
 3. Input requires explicit consent before execution
 4. No secrets logged - only metadata
 
-## New Modules
-- `protocol.rs` - Binary MessagePack wire protocol
-- `adaptive_bitrate.rs` - Network-adaptive encoding
-- `h264_encoder.rs` - Hardware encoding (stub)
+## Modules
+- `protocol.rs` - MessagePack wire types (not yet wired into the data path; frames currently go over JSON+base64)
+- `encoder.rs` - JPEG+zlib frame encoding (delta frames removed - see encoder.rs header comment)
 
 ## Design System
 - `src/lib/design-system.css` - CSS variables
-- `src/lib/stores/` - Svelte 5 runes stores
-- `src/lib/components/` - Reusable components
 
 ## Common Issues
 - encoder.rs: Avoid zlib on JPEG - causes size bloat
 - InputHandler: Uses enigo (CGEventSource not Send)
-- capture_windows.rs: macOS-only, not built on other platforms
