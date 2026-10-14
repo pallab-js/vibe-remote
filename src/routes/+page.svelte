@@ -10,6 +10,9 @@
   let connectionMode = $state<"server" | "client" | "local">("local");
   let partnerId = $state("127.0.0.1");
   let serverPort = $state(4567);
+  // SEC-1: certificate fingerprints - host displays its own, client may pin
+  let serverFingerprint = $state(""); // host: our cert fingerprint (shown after server starts)
+  let clientFingerprint = $state(""); // client: optional pinned fingerprint (empty = TOFU)
   let isConnected = $state(false);
   let isCapturing = $state(false);
   let connectionStatus = $state<"disconnected" | "connecting" | "connected" | "error" | "server">("disconnected");
@@ -206,19 +209,21 @@
         ? partnerId.split(":")
         : [partnerId, "4567"];
 
-      // SEC-1: Connect without fingerprint (TOFU mode)
-      // Users can optionally provide a fingerprint for strict pinning
+      // SEC-1: pin the certificate fingerprint if provided; otherwise TOFU
       await invoke("connect_remote", {
         params: {
           host,
           port: parseInt(port),
-          serverFingerprint: null  // TOFU mode - accepts first cert
+          serverFingerprint: clientFingerprint.trim() || null
         }
       });
 
       isConnected = true;
       connectionStatus = "connected";
-      statusMessage = `Connected to ${partnerId}`;
+      // SEC-1: be explicit when the first connection was trusted without verification
+      statusMessage = clientFingerprint.trim()
+        ? `Connected to ${partnerId} (pinned)`
+        : `Connected to ${partnerId} (TOFU — fingerprint not verified)`;
     } catch (err: any) {
       errorMsg = err.toString();
       connectionStatus = "error";
@@ -235,6 +240,10 @@
       
       // Start QUIC server
       await invoke("start_server", { port: serverPort });
+
+      // SEC-1: fetch our certificate fingerprint to share with clients
+      const fp = await invoke<string | null>("get_server_fingerprint");
+      serverFingerprint = fp ?? "";
       
       // Start capturing and streaming to clients
       statusMessage = "Starting remote stream...";
@@ -498,6 +507,17 @@
               onkeydown={(e) => e.key === "Enter" && connect()}
             />
           </div>
+          <div class="input-group">
+            <label for="fingerprint">Certificate Fingerprint <span class="label-optional">(optional — leave empty for trust-on-first-use)</span></label>
+            <input
+              id="fingerprint"
+              type="text"
+              placeholder="SHA256 fingerprint from the host"
+              bind:value={clientFingerprint}
+              spellcheck="false"
+              autocomplete="off"
+            />
+          </div>
         {:else if connectionMode === "server"}
           <div class="input-group">
             <label for="server-port">Server Port</label>
@@ -510,6 +530,18 @@
               max="65535"
             />
           </div>
+          {#if serverFingerprint}
+            <div class="input-group">
+              <label for="fingerprint-value">Certificate Fingerprint <span class="label-optional">(share with clients)</span></label>
+              <div class="fingerprint-row">
+                <code id="fingerprint-value" class="fingerprint-value" title={serverFingerprint}>{serverFingerprint}</code>
+                <button
+                  class="btn-copy"
+                  onclick={() => navigator.clipboard.writeText(serverFingerprint)}
+                >Copy</button>
+              </div>
+            </div>
+          {/if}
         {/if}
 
         <div class="button-row">
@@ -996,6 +1028,43 @@
 
   input::placeholder {
     color: var(--slate-500);
+  }
+
+  .label-optional {
+    font-weight: 400;
+    color: var(--slate-500);
+  }
+
+  .fingerprint-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .fingerprint-value {
+    flex: 1;
+    padding: 0.6rem 0.75rem;
+    font-size: 0.75rem;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--slate-600);
+    border-radius: 0.5rem;
+    color: var(--slate-300);
+    overflow-wrap: anywhere;
+  }
+
+  .btn-copy {
+    padding: 0.6rem 0.9rem;
+    font-size: 0.8rem;
+    background: rgba(59, 130, 246, 0.15);
+    border: 1px solid var(--blue-500);
+    border-radius: 0.5rem;
+    color: var(--blue-400, #60a5fa);
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .btn-copy:hover {
+    background: rgba(59, 130, 246, 0.3);
   }
 
   .button-row {
