@@ -32,11 +32,11 @@ impl BufferPool {
 
     /// Get a buffer from the pool or allocate a new one
     pub fn get(&mut self, min_capacity: usize) -> Vec<u8> {
-        if let Some(mut buf) = self.buffers.pop_front() {
-            if buf.capacity() >= min_capacity {
-                buf.clear();
-                return buf;
-            }
+        if let Some(mut buf) = self.buffers.pop_front()
+            && buf.capacity() >= min_capacity
+        {
+            buf.clear();
+            return buf;
         }
         Vec::with_capacity(min_capacity)
     }

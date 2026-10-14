@@ -467,8 +467,8 @@ async fn connect_remote(
                 Ok(data) => {
                     consecutive_errors = 0;
                     // Parse JSON frame
-                    if let Ok(frame_json) = serde_json::from_slice::<serde_json::Value>(&data) {
-                        if let (
+                    if let Ok(frame_json) = serde_json::from_slice::<serde_json::Value>(&data)
+                        && let (
                             Some(seq),
                             Some(w),
                             Some(h),
@@ -482,35 +482,35 @@ async fn connect_remote(
                             frame_json.get("ts").and_then(|v| v.as_u64()),
                             frame_json.get("type").and_then(|v| v.as_str()),
                             frame_json.get("data").and_then(|v| v.as_str()),
-                        ) {
-                            // Decode base64 data
-                            if let Ok(compressed_data) = base64_decode(data_b64) {
-                                // Decompress
-                                use std::io::Read;
-                                let mut decoder =
-                                    flate2::read::ZlibDecoder::new(compressed_data.as_slice());
-                                let mut jpeg_data = Vec::new();
-                                if decoder.read_to_end(&mut jpeg_data).is_ok() {
-                                    // Decode JPEG to RGBA (keep RGBA format)
-                                    if let Ok(img) = image::load_from_memory(&jpeg_data) {
-                                        let width = img.width() as usize;
-                                        let height = img.height() as usize;
-                                        let rgba_data = img.to_rgba8().into_raw();
+                        )
+                    {
+                        // Decode base64 data
+                        if let Ok(compressed_data) = base64_decode(data_b64) {
+                            // Decompress
+                            use std::io::Read;
+                            let mut decoder =
+                                flate2::read::ZlibDecoder::new(compressed_data.as_slice());
+                            let mut jpeg_data = Vec::new();
+                            if decoder.read_to_end(&mut jpeg_data).is_ok() {
+                                // Decode JPEG to RGBA (keep RGBA format)
+                                if let Ok(img) = image::load_from_memory(&jpeg_data) {
+                                    let width = img.width() as usize;
+                                    let height = img.height() as usize;
+                                    let rgba_data = img.to_rgba8().into_raw();
 
-                                        // Send as RGBA (no conversion needed)
-                                        let frame_data = FrameData {
-                                            width,
-                                            height,
-                                            data_b64: base64_encode(&rgba_data),
-                                            timestamp: ts as u128,
-                                        };
+                                    // Send as RGBA (no conversion needed)
+                                    let frame_data = FrameData {
+                                        width,
+                                        height,
+                                        data_b64: base64_encode(&rgba_data),
+                                        timestamp: ts as u128,
+                                    };
 
-                                        // Emit to frontend
-                                        if let Err(e) = app_clone.emit("frame", &frame_data) {
-                                            debug!("Failed to emit remote frame: {}", e);
-                                        } else {
-                                            debug!("Emitted remote frame #{} ({}x{})", seq, w, h);
-                                        }
+                                    // Emit to frontend
+                                    if let Err(e) = app_clone.emit("frame", &frame_data) {
+                                        debug!("Failed to emit remote frame: {}", e);
+                                    } else {
+                                        debug!("Emitted remote frame #{} ({}x{})", seq, w, h);
                                     }
                                 }
                             }
@@ -693,22 +693,20 @@ async fn send_mouse_input(
             .map_err(|_| "Failed to lock QUIC transport")?;
         guard.as_ref().filter(|q| q.is_connected()).cloned()
     };
-    if !is_server_mode {
-        if let Some(quic) = quic {
-            let payload = serde_json::json!({
-                "type": "mouse",
-                "mouse_type": event_type,
-                "x": x,
-                "y": y,
-                "button": button,
-            });
-            let bytes =
-                serde_json::to_vec(&payload).map_err(|e| format!("Serialization failed: {}", e))?;
-            quic.send_data(bytes.into())
-                .await
-                .map_err(|e| format!("Send failed: {}", e))?;
-            return Ok("Mouse event sent to remote".to_string());
-        }
+    if !is_server_mode && let Some(quic) = quic {
+        let payload = serde_json::json!({
+            "type": "mouse",
+            "mouse_type": event_type,
+            "x": x,
+            "y": y,
+            "button": button,
+        });
+        let bytes =
+            serde_json::to_vec(&payload).map_err(|e| format!("Serialization failed: {}", e))?;
+        quic.send_data(bytes.into())
+            .await
+            .map_err(|e| format!("Send failed: {}", e))?;
+        return Ok("Mouse event sent to remote".to_string());
     }
 
     let input_guard = state
@@ -788,20 +786,18 @@ async fn send_keyboard_input(
             .map_err(|_| "Failed to lock QUIC transport")?;
         guard.as_ref().filter(|q| q.is_connected()).cloned()
     };
-    if !is_server_mode {
-        if let Some(quic) = quic {
-            let payload = serde_json::json!({
-                "type": "keyboard",
-                "key_type": event_type,
-                "key": key,
-            });
-            let bytes =
-                serde_json::to_vec(&payload).map_err(|e| format!("Serialization failed: {}", e))?;
-            quic.send_data(bytes.into())
-                .await
-                .map_err(|e| format!("Send failed: {}", e))?;
-            return Ok("Keyboard event sent to remote".to_string());
-        }
+    if !is_server_mode && let Some(quic) = quic {
+        let payload = serde_json::json!({
+            "type": "keyboard",
+            "key_type": event_type,
+            "key": key,
+        });
+        let bytes =
+            serde_json::to_vec(&payload).map_err(|e| format!("Serialization failed: {}", e))?;
+        quic.send_data(bytes.into())
+            .await
+            .map_err(|e| format!("Send failed: {}", e))?;
+        return Ok("Keyboard event sent to remote".to_string());
     }
 
     let input_guard = state

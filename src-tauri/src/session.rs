@@ -257,11 +257,11 @@ impl ConnectionManager {
 
     /// Mark connection as lost and start reconnection
     pub fn trigger_reconnect(&self) {
-        if let Ok(mut state) = self.session.reconnect_state.lock() {
-            if *state == ReconnectState::Connected {
-                *state = ReconnectState::Disconnected;
-                info!("Connection lost, reconnection will be triggered");
-            }
+        if let Ok(mut state) = self.session.reconnect_state.lock()
+            && *state == ReconnectState::Connected
+        {
+            *state = ReconnectState::Disconnected;
+            info!("Connection lost, reconnection will be triggered");
         }
     }
 }
@@ -343,7 +343,7 @@ pub async fn start_frame_streaming(
         }
 
         // Report stats every 100 frames
-        if frame_count % 100 == 0 {
+        if frame_count.is_multiple_of(100) {
             let elapsed = last_report.elapsed();
             let fps = 100.0 / elapsed.as_secs_f64();
             debug!(
