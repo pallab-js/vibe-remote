@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A QUIC-powered Remote Desktop for the Modern Era"
 authors = ["you"]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [lib]
 name = "vibe_remote_lib"
