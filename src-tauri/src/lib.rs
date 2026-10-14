@@ -2,21 +2,16 @@
 //!
 //! Core library providing screen capture, QUIC transport, and input injection.
 
-pub mod adaptive_bitrate;
-pub mod audio;
 pub mod auth;
 pub mod capture;
-pub mod connection;
 pub mod encoder;
 pub mod error;
-pub mod h264_encoder;
 pub mod input;
 pub mod logging;
 pub mod protocol;
 pub mod session;
 pub mod transport;
 
-pub use adaptive_bitrate::{AdaptiveBitrateController, QualityPreset};
 pub use protocol::{
     WireFrame, WireMessage, encode_clipboard, encode_frame, encode_input, encode_ping, encode_pong,
 };
@@ -31,7 +26,6 @@ use tauri::{Emitter, State};
 use auth::PeerIdentity;
 use capture::{CaptureConfig, CaptureStream};
 use encoder::FrameEncoder;
-use h264_encoder::H264Encoder;
 use input::{InputHandler, KeyboardEvent, MouseButton, MouseEvent, VirtualKey};
 use session::{ConnectionManager, SessionState};
 use transport::QuicTransport;
@@ -50,7 +44,6 @@ pub struct AppState {
     pub quic_transport: Mutex<Option<Arc<QuicTransport>>>,
     pub input_handler: Mutex<Option<InputHandler>>,
     pub frame_encoder: Mutex<Option<FrameEncoder>>,
-    pub h264_encoder: Mutex<Option<H264Encoder>>,
     pub session_state: SessionState,
     pub connection_manager: Mutex<Option<ConnectionManager>>,
     pub is_server_mode: Mutex<bool>,
@@ -1311,7 +1304,6 @@ pub fn run() {
                     .ok(),
             ),
             frame_encoder: Mutex::new(None),
-            h264_encoder: Mutex::new(None),
             session_state: SessionState::default(),
             connection_manager: Mutex::new(None),
             is_server_mode: Mutex::new(false),

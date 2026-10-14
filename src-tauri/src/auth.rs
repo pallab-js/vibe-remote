@@ -9,7 +9,6 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use snow::HandshakeState;
 use std::fs;
 use std::path::Path;
 
@@ -192,100 +191,6 @@ impl PeerIdentity {
     /// Get name
     pub fn name(&self) -> &str {
         &self.name
-    }
-}
-
-/// Noise Protocol handshake manager
-/// NOTE: QUIC already provides TLS 1.3 encryption. This is provided for future
-/// application-layer authentication if desired. Currently unused.
-#[allow(dead_code)]
-pub struct NoiseHandshake {
-    /// Noise handshake state
-    state: HandshakeState,
-    /// Our identity
-    identity: PeerIdentity,
-}
-
-impl NoiseHandshake {
-    /// Create new noise handshake for initiator (client)
-    pub fn new_initiator(identity: PeerIdentity, remote_public_key_b64: &str) -> VibeResult<Self> {
-        // Parse remote public key
-        let remote_key_bytes = BASE64
-            .decode(remote_public_key_b64)
-            .map_err(|e| VibeError::Config(format!("Invalid remote key: {}", e)))?;
-
-        let pub_identity = identity.public_identity();
-        let key_bytes = pub_identity.verifying_key_bytes();
-
-        // Noise protocol pattern: XX handshake (mutual auth)
-        let builder = snow::Builder::new(
-            "Noise_XX_25519_ChaChaPoly_BLAKE2s"
-                .parse()
-                .map_err(|e| VibeError::Config(format!("Invalid noise pattern: {}", e)))?,
-        )
-        .prologue(&key_bytes)
-        .prologue(&remote_key_bytes);
-
-        let state = builder
-            .build_initiator()
-            .map_err(|e| VibeError::Config(format!("Failed to build initiator: {}", e)))?;
-
-        Ok(Self { state, identity })
-    }
-
-    /// Create new noise handshake for responder (server)
-    pub fn new_responder(identity: PeerIdentity) -> VibeResult<Self> {
-        let pub_identity = identity.public_identity();
-        let key_bytes = pub_identity.verifying_key_bytes();
-
-        let builder = snow::Builder::new(
-            "Noise_XX_25519_ChaChaPoly_BLAKE2s"
-                .parse()
-                .map_err(|e| VibeError::Config(format!("Invalid noise pattern: {}", e)))?,
-        )
-        .prologue(&key_bytes);
-
-        let state = builder
-            .build_responder()
-            .map_err(|e| VibeError::Config(format!("Failed to build responder: {}", e)))?;
-
-        Ok(Self { state, identity })
-    }
-
-    /// Write handshake message
-    pub fn write_message(&mut self, payload: &[u8], out: &mut Vec<u8>) -> VibeResult<bool> {
-        out.clear();
-        out.reserve(payload.len() + 100);
-        out.extend_from_slice(payload);
-
-        let written = self
-            .state
-            .write_message(payload, out)
-            .map_err(|e| VibeError::Config(format!("Handshake write failed: {}", e)))?;
-
-        out.truncate(written);
-
-        // Check if handshake is complete
-        Ok(self.state.is_handshake_finished())
-    }
-
-    /// Read handshake message
-    pub fn read_message(&mut self, message: &[u8], out: &mut Vec<u8>) -> VibeResult<bool> {
-        out.clear();
-
-        let written = self
-            .state
-            .read_message(message, out)
-            .map_err(|e| VibeError::Config(format!("Handshake read failed: {}", e)))?;
-
-        out.truncate(written);
-
-        Ok(self.state.is_handshake_finished())
-    }
-
-    /// Get handshake completion status
-    pub fn is_finished(&self) -> bool {
-        self.state.is_handshake_finished()
     }
 }
 

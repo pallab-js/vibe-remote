@@ -52,10 +52,8 @@ rmp-serde = "1"
 # Time utilities - using default-features=false to avoid time crate (use chrono instead)
 chrono = { version = "0.4", features = ["serde"], default-features = false }
 
-# Video encoding - Hardware acceleration
-core-video = "0.1"
-core-foundation = "0.9"
-video-toolbox-sys = { version = "0.2", features = ["helpers"] }
+# Video encoding - hardware acceleration is not wired up yet; add back
+# when h264_encoder.rs is actually implemented and instantiated
 
 # Clipboard sync
 arboard = "3"
@@ -63,23 +61,16 @@ arboard = "3"
 # Directory paths
 dirs = "5"
 
-# STUN/TURN for NAT traversal
-stun = "0.5"
-turn = "0.8"
-
-# Security - Ed25519 + Noise Protocol
+# Security - Ed25519 identity (QUIC/TLS provides transport encryption;
+# Noise was removed as unused - QUIC already does TLS 1.3)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 rand_core = "0.6"
-snow = "0.9"
 base64 = "0.22"
 zeroize = "1"
 
 # Bytes manipulation
 bytes = "1"
-
-# Audio capture
-coreaudio-rs = "0.14"
 
 [profile.release]
 strip = true
