@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use auth::PeerIdentity;
 use capture::{CaptureConfig, CaptureStream};
@@ -152,7 +152,7 @@ async fn init_vibe(state: State<'_, AppState>) -> Result<String, String> {
 async fn start_server(
     state: State<'_, AppState>,
     port: u16,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<String, String> {
     info!("Starting QUIC server on port {}", port);
 
@@ -178,17 +178,75 @@ async fn start_server(
         return Err("Failed to lock QUIC transport".to_string());
     }
 
-    // Spawn accept loop in background
+    // Spawn accept loop; incoming datagrams carry viewer input events
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
     let server_for_accept = server_arc;
     tokio::spawn(async move {
         info!("Starting QUIC accept loop");
-        if let Err(e) = server_for_accept.accept_connections().await {
+        if let Err(e) = server_for_accept.accept_connections(input_tx).await {
             error!("QUIC accept loop error: {}", e);
+        }
+    });
+
+    // Inject remote viewer input, enforcing consent and rate limits on the host side
+    let app_for_input = app.clone();
+    tokio::spawn(async move {
+        while let Some(bytes) = input_rx.recv().await {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                debug!("Dropping non-JSON input datagram ({} bytes)", bytes.len());
+                continue;
+            };
+
+            let state = app_for_input.state::<AppState>();
+
+            // SEC-3: default-deny consent on the host (viewer cannot self-grant)
+            if !state.input_consent_granted.load(Ordering::SeqCst) {
+                warn!("SEC-3: dropped remote input - consent not granted");
+                continue;
+            }
+
+            // SEC-2: rate limit network input (200/sec covers mouse + keyboard bursts)
+            if let Err(e) = check_rate_limit(&state, "remote_input", 200, 1) {
+                warn!("SEC-2: {}", e);
+                continue;
+            }
+
+            // Viewer canvas is a scaled frame; map to native screen coords
+            let (sx, sy) = state.session_state.input_scale();
+            let value = scale_input_coords(value, sx, sy);
+
+            let handler = state
+                .input_handler
+                .lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            let Some(handler) = handler else {
+                warn!("Remote input dropped: no input handler (Accessibility not granted)");
+                continue;
+            };
+
+            if let Err(e) = session::handle_remote_input(value, &handler, &state.session_state) {
+                debug!("Remote input rejected: {}", e);
+            }
         }
     });
 
     info!("QUIC server started on port {}", port);
     Ok(format!("Server started on port {}", port))
+}
+
+/// Map viewer-space mouse coords to native screen coords (wheel deltas unchanged)
+pub fn scale_input_coords(mut v: serde_json::Value, sx: f32, sy: f32) -> serde_json::Value {
+    let is_scroll_wheel = v.get("mouse_type").and_then(|t| t.as_str()) == Some("wheel");
+    if v.get("type").and_then(|t| t.as_str()) == Some("mouse") && !is_scroll_wheel {
+        if let Some(x) = v.get("x").and_then(|x| x.as_i64()) {
+            v["x"] = serde_json::Value::from((x as f32 * sx) as i32);
+        }
+        if let Some(y) = v.get("y").and_then(|y| y.as_i64()) {
+            v["y"] = serde_json::Value::from((y as f32 * sy) as i32);
+        }
+    }
+    v
 }
 
 /// Get available displays
@@ -493,8 +551,12 @@ async fn start_remote_stream(
 ) -> Result<String, String> {
     info!("Starting remote streaming session");
 
-    // Initialize frame encoder
+    // Initialize frame encoder; the viewer canvas is this scale of native res,
+    // so map its coordinates back to native when injecting input
     let encoder = FrameEncoder::default();
+    state
+        .session_state
+        .set_input_scale(1.0 / encoder.scale(), 1.0 / encoder.scale());
     *state
         .frame_encoder
         .lock()
@@ -526,15 +588,6 @@ async fn start_remote_stream(
             .map_err(|_| "Failed to lock QUIC transport")?;
         quic_guard.as_ref().ok_or("QUIC not initialized")?.clone()
     };
-
-    // Get input handler
-    let _input_guard = state
-        .input_handler
-        .lock()
-        .map_err(|_| "Failed to lock input handler")?;
-    #[allow(clippy::arc_with_non_send_sync)]
-    let _input_arc = Arc::new(_input_guard.clone());
-    drop(_input_guard);
 
     // Get encoder
     let enc_guard = state
@@ -613,8 +666,9 @@ fn stop_session(state: State<'_, AppState>) -> Result<String, String> {
 /// Handle mouse input from frontend
 /// SEC-2: Rate limiting enforced (100 calls/sec)
 /// SEC-3: Backend consent enforcement
+/// Viewer mode: forwarded over QUIC to the host, which re-checks consent
 #[tauri::command]
-fn send_mouse_input(
+async fn send_mouse_input(
     state: State<'_, AppState>,
     event_type: String,
     x: i32,
@@ -626,6 +680,36 @@ fn send_mouse_input(
 
     // SEC-2: Rate limiting - max 100 mouse events per second
     check_rate_limit(&state, "send_mouse_input", 100, 1)?;
+
+    // Viewer mode: forward over QUIC instead of injecting locally
+    let is_server_mode = *state
+        .is_server_mode
+        .lock()
+        .map_err(|_| "Failed to lock server mode")?;
+    let quic = {
+        let guard = state
+            .quic_transport
+            .lock()
+            .map_err(|_| "Failed to lock QUIC transport")?;
+        guard.as_ref().filter(|q| q.is_connected()).cloned()
+    };
+    if !is_server_mode {
+        if let Some(quic) = quic {
+            let payload = serde_json::json!({
+                "type": "mouse",
+                "mouse_type": event_type,
+                "x": x,
+                "y": y,
+                "button": button,
+            });
+            let bytes =
+                serde_json::to_vec(&payload).map_err(|e| format!("Serialization failed: {}", e))?;
+            quic.send_data(bytes.into())
+                .await
+                .map_err(|e| format!("Send failed: {}", e))?;
+            return Ok("Mouse event sent to remote".to_string());
+        }
+    }
 
     let input_guard = state
         .input_handler
@@ -679,8 +763,9 @@ fn send_mouse_input(
 /// Handle keyboard input from frontend
 /// SEC-2: Rate limiting enforced (50 keys/sec)
 /// SEC-3: Backend consent enforcement
+/// Viewer mode: forwarded over QUIC to the host, which re-checks consent
 #[tauri::command]
-fn send_keyboard_input(
+async fn send_keyboard_input(
     state: State<'_, AppState>,
     key: String,
     event_type: String,
@@ -690,6 +775,34 @@ fn send_keyboard_input(
 
     // SEC-2: Rate limiting - max 50 keyboard events per second
     check_rate_limit(&state, "send_keyboard_input", 50, 1)?;
+
+    // Viewer mode: forward over QUIC instead of injecting locally
+    let is_server_mode = *state
+        .is_server_mode
+        .lock()
+        .map_err(|_| "Failed to lock server mode")?;
+    let quic = {
+        let guard = state
+            .quic_transport
+            .lock()
+            .map_err(|_| "Failed to lock QUIC transport")?;
+        guard.as_ref().filter(|q| q.is_connected()).cloned()
+    };
+    if !is_server_mode {
+        if let Some(quic) = quic {
+            let payload = serde_json::json!({
+                "type": "keyboard",
+                "key_type": event_type,
+                "key": key,
+            });
+            let bytes =
+                serde_json::to_vec(&payload).map_err(|e| format!("Serialization failed: {}", e))?;
+            quic.send_data(bytes.into())
+                .await
+                .map_err(|e| format!("Send failed: {}", e))?;
+            return Ok("Keyboard event sent to remote".to_string());
+        }
+    }
 
     let input_guard = state
         .input_handler

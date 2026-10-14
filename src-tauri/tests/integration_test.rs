@@ -99,14 +99,13 @@ async fn test_input_handler() {
 
 /// Test QUIC local tunnel
 #[tokio::test]
-#[ignore] // Timing out in test environment
 async fn test_quic_local_tunnel() {
     init_crypto_provider();
 
     use vibe_remote_lib::transport::create_local_tunnel;
 
     // Create local tunnel
-    let (server, client) = create_local_tunnel()
+    let (server, client, _rx) = create_local_tunnel()
         .await
         .expect("Failed to create local tunnel");
 
@@ -117,6 +116,90 @@ async fn test_quic_local_tunnel() {
     assert!(client.is_connected());
 
     println!("QUIC local tunnel established successfully");
+}
+
+/// Test that viewer input datagrams reach the host's receive loop
+#[tokio::test]
+async fn test_input_datagram_roundtrip() {
+    init_crypto_provider();
+
+    use vibe_remote_lib::transport::create_local_tunnel;
+
+    // Create local tunnel (accept loop runs inside; server receives datagrams via rx)
+    let (server, client, mut rx) = create_local_tunnel()
+        .await
+        .expect("Failed to create local tunnel");
+
+    // Verify server is listening
+    assert!(server.endpoint().local_addr().is_ok());
+
+    // Verify client is connected
+    assert!(client.is_connected());
+
+    // Viewer sends an input event datagram
+    let input = serde_json::json!({
+        "type": "mouse",
+        "mouse_type": "move",
+        "x": 100,
+        "y": 200,
+        "button": null,
+    });
+    client
+        .send_data(serde_json::to_vec(&input).unwrap().into())
+        .await
+        .expect("Failed to send input datagram");
+
+    // Host should receive it
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("Timed out waiting for input datagram")
+        .expect("Channel closed");
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&received).expect("Datagram should be valid JSON");
+    assert_eq!(value["type"], "mouse");
+    assert_eq!(value["mouse_type"], "move");
+    assert_eq!(value["x"], 100);
+    assert_eq!(value["y"], 200);
+}
+
+/// Test coordinate scaling from viewer canvas space to native screen space
+#[test]
+fn test_scale_input_coords() {
+    // Viewer canvas is 0.75x native; host maps back with 1/0.75
+    let sx = 1.0 / 0.75;
+    let sy = 1.0 / 0.75;
+
+    let mouse = serde_json::json!({
+        "type": "mouse",
+        "mouse_type": "move",
+        "x": 750,
+        "y": 600,
+        "button": null,
+    });
+    let scaled = vibe_remote_lib::scale_input_coords(mouse, sx, sy);
+    assert_eq!(scaled["x"], 1000);
+    assert_eq!(scaled["y"], 800);
+
+    // Wheel deltas are scroll amounts, not coordinates - must not scale
+    let wheel = serde_json::json!({
+        "type": "mouse",
+        "mouse_type": "wheel",
+        "x": 0,
+        "y": -10,
+        "button": null,
+    });
+    let scaled = vibe_remote_lib::scale_input_coords(wheel, sx, sy);
+    assert_eq!(scaled["y"], -10);
+
+    // Keyboard events pass through unscaled
+    let key = serde_json::json!({
+        "type": "keyboard",
+        "key_type": "down",
+        "key": "a",
+    });
+    let scaled = vibe_remote_lib::scale_input_coords(key, sx, sy);
+    assert_eq!(scaled["key"], "a");
 }
 
 /// Test peer identity generation and verification
@@ -204,11 +287,10 @@ async fn benchmark_frame_encoding() {
 
 /// Benchmark QUIC datagram throughput
 #[tokio::test]
-#[ignore] // Timing out in test environment
 async fn benchmark_quic_throughput() {
     init_crypto_provider();
 
-    let (_server, _client) = create_local_tunnel()
+    let (_server, _client, _rx) = create_local_tunnel()
         .await
         .expect("Failed to create tunnel");
 

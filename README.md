@@ -64,7 +64,7 @@ src-tauri/
 Current status is honest and narrow:
 
 - Video streams end-to-end (capture → JPEG → QUIC → render), but every frame is a full keyframe — no delta frames or adaptive bitrate yet.
-- Remote input is not delivered over the network yet; input commands work on the local path only.
+- Remote input works: viewer events are forwarded over QUIC datagrams and injected on the host (host-side consent + rate limiting apply).
 - LAN/direct IP only — no NAT traversal or relay.
 - macOS only. No Windows build.
 - File transfer is not implemented.
@@ -89,7 +89,6 @@ Transport encryption, pinning, identity, consent, and rate limiting are layered 
 
 ## Roadmap
 
-- [ ] Deliver remote input over the QUIC data path
 - [ ] Display and verify the server certificate fingerprint in the UI
 - [ ] Delta frames or hardware H.264 for higher FPS at lower bandwidth
 - [ ] Adaptive bitrate

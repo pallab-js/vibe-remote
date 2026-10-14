@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -115,15 +116,27 @@ fn load_fingerprint(server_name: &str) -> VibeResult<Option<String>> {
 }
 
 /// QUIC transport wrapper
-#[derive(Clone)]
 pub struct QuicTransport {
     endpoint: Endpoint,
     config: QuicConfig,
-    connection: Option<Connection>,
+    /// Active connection (client: set on connect; server: set when a client connects)
+    connection: Mutex<Option<Connection>>,
     /// Peer's certificate fingerprint for pinning (SHA256 of DER)
     pub pinned_fingerprint: Option<String>,
     /// HIGH-3: Peer's Ed25519 public key for Noise Protocol authentication
     pub peer_public_key_b64: Option<String>,
+}
+
+impl Clone for QuicTransport {
+    fn clone(&self) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+            config: self.config.clone(),
+            connection: Mutex::new(self.connection.lock().map(|g| g.clone()).unwrap_or(None)),
+            pinned_fingerprint: self.pinned_fingerprint.clone(),
+            peer_public_key_b64: self.peer_public_key_b64.clone(),
+        }
+    }
 }
 
 impl QuicTransport {
@@ -175,7 +188,7 @@ impl QuicTransport {
         Ok(Self {
             endpoint,
             config,
-            connection: None,
+            connection: Mutex::new(None),
             pinned_fingerprint: Some(fingerprint),
             peer_public_key_b64: None,
         })
@@ -196,15 +209,29 @@ impl QuicTransport {
         Ok(Self {
             endpoint,
             config,
-            connection: None,
+            connection: Mutex::new(None),
             pinned_fingerprint: None,
             peer_public_key_b64: peer_key,
         })
     }
 
+    /// Get a handle to the active connection, if any
+    fn connection(&self) -> VibeResult<Connection> {
+        self.connection
+            .lock()
+            .map_err(|_| VibeError::Connection("Connection lock poisoned".to_string()))?
+            .clone()
+            .ok_or_else(|| VibeError::Connection("Not connected".to_string()))
+    }
+
     /// Start accepting connections (server mode)
     /// SEC-4: Logs incoming connections for audit trail
-    pub async fn accept_connections(&self) -> VibeResult<()> {
+    /// Stores the latest accepted connection so send_data (frames) reaches the client,
+    /// and forwards incoming datagrams (viewer input) to `input_tx`.
+    pub async fn accept_connections(
+        &self,
+        input_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    ) -> VibeResult<()> {
         info!("QUIC server listening on {}", self.config.bind_addr);
 
         loop {
@@ -218,12 +245,21 @@ impl QuicTransport {
                     Ok(connection) => {
                         info!("QUIC connection established with {}", remote_addr);
 
-                        // Spawn handler for this connection
-                        let conn = connection.clone();
+                        // Store so server-side send_data reaches this client
+                        // ponytail: last client wins; per-client routing when multi-viewer matters
+                        if let Ok(mut guard) = self.connection.lock() {
+                            *guard = Some(connection.clone());
+                        }
+
+                        // Forward input datagrams to the app layer
+                        let tx = input_tx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = Self::handle_connection(conn).await {
-                                error!("Connection handler error: {}", e);
+                            while let Ok(data) = connection.read_datagram().await {
+                                if tx.send(data.to_vec()).await.is_err() {
+                                    break;
+                                }
                             }
+                            debug!("Datagram loop ended for {}", remote_addr);
                         });
                     }
                     Err(e) => {
@@ -251,10 +287,11 @@ impl QuicTransport {
 
         // Build client config with certificate pinning
         let verifier = FingerprintVerifier::new(server_fingerprint.clone());
-        let rustls_client = rustls::ClientConfig::builder()
+        let mut rustls_client = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
+        rustls_client.alpn_protocols = self.config.alpn_protocols.clone();
 
         let quic_crypto = QuicClientConfig::try_from(rustls_client)
             .map_err(|e| VibeError::Config(format!("QuicClientConfig failed: {}", e)))?;
@@ -272,7 +309,9 @@ impl QuicTransport {
             .map_err(|e| VibeError::Connection(format!("Connection failed: {}", e)))?;
 
         info!("QUIC connection established with pinned certificate");
-        self.connection = Some(connection.clone());
+        if let Ok(mut guard) = self.connection.lock() {
+            *guard = Some(connection.clone());
+        }
         self.pinned_fingerprint = Some(server_fingerprint);
         Ok(connection)
     }
@@ -290,10 +329,11 @@ impl QuicTransport {
 
         // Build client config with TOFU verifier that persists fingerprints
         let verifier = TofuVerifier::new(self.config.server_name.clone());
-        let rustls_client = rustls::ClientConfig::builder()
+        let mut rustls_client = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
+        rustls_client.alpn_protocols = self.config.alpn_protocols.clone();
 
         let quic_crypto = QuicClientConfig::try_from(rustls_client)
             .map_err(|e| VibeError::Config(format!("QuicClientConfig failed: {}", e)))?;
@@ -311,7 +351,9 @@ impl QuicTransport {
             .map_err(|e| VibeError::Connection(format!("Connection failed: {}", e)))?;
 
         info!("SEC-1: TOFU connection established with persistent fingerprint storage.");
-        self.connection = Some(connection.clone());
+        if let Ok(mut guard) = self.connection.lock() {
+            *guard = Some(connection.clone());
+        }
         Ok(connection)
     }
 
@@ -324,10 +366,7 @@ impl QuicTransport {
 
     /// Open a reliable bidirectional stream
     pub async fn open_stream(&self) -> VibeResult<(SendStream, RecvStream)> {
-        let connection = self
-            .connection
-            .as_ref()
-            .ok_or_else(|| VibeError::Connection("Not connected".to_string()))?;
+        let connection = self.connection()?;
 
         let (send, recv) = connection
             .open_bi()
@@ -338,12 +377,9 @@ impl QuicTransport {
         Ok((send, recv))
     }
 
-    /// Send unreliable datagram (for video frames)
+    /// Send unreliable datagram (for video frames and input events)
     pub async fn send_datagram(&self, data: bytes::Bytes) -> VibeResult<()> {
-        let connection = self
-            .connection
-            .as_ref()
-            .ok_or_else(|| VibeError::Connection("Not connected".to_string()))?;
+        let connection = self.connection()?;
 
         connection
             .send_datagram(data.clone())
@@ -360,10 +396,7 @@ impl QuicTransport {
 
     /// Receive datagrams
     pub async fn receive_datagram(&self) -> VibeResult<bytes::Bytes> {
-        let connection = self
-            .connection
-            .as_ref()
-            .ok_or_else(|| VibeError::Connection("Not connected".to_string()))?;
+        let connection = self.connection()?;
 
         let data = connection
             .read_datagram()
@@ -373,49 +406,9 @@ impl QuicTransport {
         Ok(data)
     }
 
-    /// Handle an incoming QUIC connection
-    async fn handle_connection(connection: Connection) -> VibeResult<()> {
-        let remote = connection.remote_address();
-        info!("Handling connection from {}", remote);
-
-        loop {
-            // Accept incoming streams
-            match connection.accept_bi().await {
-                Ok((mut send, mut recv)) => {
-                    debug!("Accepted bidirectional stream from {}", remote);
-
-                    // Spawn handler for this stream
-                    tokio::spawn(async move {
-                        // Echo back for now (will be replaced with actual command handling)
-                        let buffer = match recv.read_to_end(1024 * 1024).await {
-                            Ok(buf) => buf,
-                            Err(e) => {
-                                error!("Stream read error: {}", e);
-                                return;
-                            }
-                        };
-
-                        debug!("Received {} bytes from {}", buffer.len(), remote);
-
-                        // Send response
-                        if let Err(e) = send.write_all(&buffer).await {
-                            error!("Stream write error: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Failed to accept stream: {}", e);
-                    break;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Check if connected
     pub fn is_connected(&self) -> bool {
-        self.connection.is_some()
+        self.connection.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
     /// Get the local endpoint
@@ -595,8 +588,14 @@ impl rustls::client::danger::ServerCertVerifier for TofuVerifier {
 
 // Remove the old NoVerifier struct entirely
 
-/// Create a local QUIC tunnel for testing
-pub async fn create_local_tunnel() -> VibeResult<(QuicTransport, QuicTransport)> {
+/// Create a local QUIC tunnel for testing.
+/// Returns the server, the client, and the server's input-datagram receiver
+/// (datagrams sent by the client appear here).
+pub async fn create_local_tunnel() -> VibeResult<(
+    QuicTransport,
+    QuicTransport,
+    tokio::sync::mpsc::Receiver<Vec<u8>>,
+)> {
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -625,6 +624,14 @@ pub async fn create_local_tunnel() -> VibeResult<(QuicTransport, QuicTransport)>
     let server = QuicTransport::new_server(server_config).await?;
     let mut client = QuicTransport::new_client(client_config).await?;
 
+    // The server must accept for the QUIC handshake to complete; the returned
+    // receiver delivers the client's input datagrams.
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+    let accept_server = server.clone();
+    tokio::spawn(async move {
+        let _ = accept_server.accept_connections(input_tx).await;
+    });
+
     // Connect client to server using the server's fingerprint
     let fingerprint = server
         .pinned_fingerprint
@@ -632,5 +639,5 @@ pub async fn create_local_tunnel() -> VibeResult<(QuicTransport, QuicTransport)>
         .ok_or_else(|| VibeError::Config("Server has no fingerprint".to_string()))?;
     client.connect_with_fingerprint(fingerprint).await?;
 
-    Ok((server, client))
+    Ok((server, client, input_rx))
 }

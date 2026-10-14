@@ -67,6 +67,8 @@ pub struct SessionState {
     pub bytes_received: Arc<AtomicU64>,
     reconnect_state: Arc<Mutex<ReconnectState>>,
     pub reconnect_config: Arc<Mutex<ReconnectConfig>>,
+    /// Viewer-canvas -> native-screen coordinate scale (sx, sy)
+    input_scale: Arc<Mutex<(f32, f32)>>,
 }
 
 impl Clone for SessionState {
@@ -79,6 +81,7 @@ impl Clone for SessionState {
             bytes_received: self.bytes_received.clone(),
             reconnect_state: self.reconnect_state.clone(),
             reconnect_config: self.reconnect_config.clone(),
+            input_scale: self.input_scale.clone(),
         }
     }
 }
@@ -93,11 +96,24 @@ impl Default for SessionState {
             bytes_received: Arc::new(AtomicU64::new(0)),
             reconnect_state: Arc::new(Mutex::new(ReconnectState::Disconnected)),
             reconnect_config: Arc::new(Mutex::new(ReconnectConfig::default())),
+            input_scale: Arc::new(Mutex::new((1.0, 1.0))),
         }
     }
 }
 
 impl SessionState {
+    /// Set viewer-canvas -> native-screen coordinate scale
+    pub fn set_input_scale(&self, sx: f32, sy: f32) {
+        if let Ok(mut guard) = self.input_scale.lock() {
+            *guard = (sx, sy);
+        }
+    }
+
+    /// Get viewer-canvas -> native-screen coordinate scale
+    pub fn input_scale(&self) -> (f32, f32) {
+        self.input_scale.lock().map(|g| *g).unwrap_or((1.0, 1.0))
+    }
+
     /// Set reconnect configuration
     pub fn set_reconnect_config(&self, config: ReconnectConfig) {
         if let Ok(mut guard) = self.reconnect_config.lock() {
@@ -346,10 +362,11 @@ pub async fn start_frame_streaming(
 }
 
 /// Handle remote input events and inject them
-pub async fn handle_remote_input(
+/// (sync: enigo's CGEventSource is not Send, so the handler must not live across an await)
+pub fn handle_remote_input(
     input_data: serde_json::Value,
-    input_handler: Arc<std::sync::Mutex<InputHandler>>,
-    session: SessionState,
+    input_handler: &InputHandler,
+    session: &SessionState,
 ) -> Result<(), String> {
     let event_type = input_data["type"].as_str().ok_or("Missing event type")?;
 
@@ -383,8 +400,7 @@ pub async fn handle_remote_input(
                 _ => return Err(format!("Unknown mouse type: {}", mouse_type)),
             };
 
-            let handler = input_handler.lock().map_err(|e| e.to_string())?;
-            handler
+            input_handler
                 .handle_mouse_event(event)
                 .map_err(|e| e.to_string())?;
         }
@@ -401,8 +417,7 @@ pub async fn handle_remote_input(
                 _ => return Err(format!("Unknown key type: {}", key_type)),
             };
 
-            let handler = input_handler.lock().map_err(|e| e.to_string())?;
-            handler
+            input_handler
                 .handle_keyboard_event(event)
                 .map_err(|e| e.to_string())?;
         }

@@ -207,6 +207,11 @@ impl FrameEncoder {
             scale: self.scale,
         }
     }
+
+    /// Target resolution scale (1.0 = full, <1.0 = downscaled)
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
 }
 
 /// Encoder statistics for monitoring
