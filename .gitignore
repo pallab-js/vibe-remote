@@ -23,11 +23,9 @@ vite.config.ts.timestamp-*
 target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
 
 # Tauri
 src-tauri/target/
-src-tauri/Cargo.lock
 
 # IDEs
 .vscode/
