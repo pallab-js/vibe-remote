@@ -22,7 +22,9 @@ pub enum ReconnectState {
     Disconnected,
     Connecting,
     Connected,
-Reconnecting { attempt: u32 },
+    Reconnecting {
+        attempt: u32,
+    },
 }
 
 impl fmt::Display for ReconnectState {
@@ -105,7 +107,8 @@ impl SessionState {
 
     /// Get current connection status
     pub fn is_connected(&self) -> bool {
-        self.reconnect_state.lock()
+        self.reconnect_state
+            .lock()
             .map(|g| *g == ReconnectState::Connected)
             .unwrap_or(false)
     }
@@ -132,14 +135,16 @@ impl SessionState {
 
     /// Check if reconnection should be attempted
     pub fn should_reconnect(&self) -> bool {
-        self.reconnect_config.lock()
+        self.reconnect_config
+            .lock()
             .map(|g| g.max_attempts > 0)
             .unwrap_or(false)
     }
 
     /// Get current reconnect state
     pub fn get_reconnect_state(&self) -> ReconnectState {
-        self.reconnect_state.lock()
+        self.reconnect_state
+            .lock()
             .map(|g| *g)
             .unwrap_or(ReconnectState::Disconnected)
     }
@@ -173,17 +178,28 @@ impl ConnectionManager {
     {
         // Clone config values before entering async context
         let (mut delay_ms, max_attempts, max_delay_ms, backoff_multiplier) = {
-            let config = self.session.reconnect_config.lock()
+            let config = self
+                .session
+                .reconnect_config
+                .lock()
                 .map_err(|_| "Failed to lock reconnect_config")?;
-            (config.initial_delay_ms, config.max_attempts, config.max_delay_ms, config.backoff_multiplier)
+            (
+                config.initial_delay_ms,
+                config.max_attempts,
+                config.max_delay_ms,
+                config.backoff_multiplier,
+            )
         };
 
         for attempt in 1..=max_attempts {
             debug!("Connection attempt {}/{}", attempt, max_attempts);
 
             {
-                let mut state = self.session.reconnect_state.lock()
-            .map_err(|_| "Failed to lock reconnect_state")?;
+                let mut state = self
+                    .session
+                    .reconnect_state
+                    .lock()
+                    .map_err(|_| "Failed to lock reconnect_state")?;
                 if attempt == 1 {
                     *state = ReconnectState::Connecting;
                 } else {
@@ -193,8 +209,11 @@ impl ConnectionManager {
 
             match connect_fn().await {
                 Ok(result) => {
-                    let mut state = self.session.reconnect_state.lock()
-            .map_err(|_| "Failed to lock reconnect_state")?;
+                    let mut state = self
+                        .session
+                        .reconnect_state
+                        .lock()
+                        .map_err(|_| "Failed to lock reconnect_state")?;
                     *state = ReconnectState::Connected;
                     info!("Connection established on attempt {}", attempt);
                     return Ok(result);
@@ -211,7 +230,10 @@ impl ConnectionManager {
             }
         }
 
-        let mut state = self.session.reconnect_state.lock()
+        let mut state = self
+            .session
+            .reconnect_state
+            .lock()
             .map_err(|_| "Failed to lock reconnect_state")?;
         *state = ReconnectState::Disconnected;
         Err("Connection failed after maximum retries".to_string())
@@ -276,10 +298,7 @@ pub async fn start_frame_streaming(
             "w": encoded.width,
             "h": encoded.height,
             "ts": encoded.timestamp,
-            "type": match encoded.frame_type {
-                crate::encoder::FrameType::KeyFrame => "key",
-                crate::encoder::FrameType::DeltaFrame => "delta",
-            },
+            "type": "key",
             "data": base64_encode(&encoded.data),
         });
 
@@ -373,8 +392,8 @@ pub async fn handle_remote_input(
             let key_type = input_data["key_type"].as_str().ok_or("Missing key type")?;
             let key_str = input_data["key"].as_str().ok_or("Missing key")?;
 
-            let vk =
-                VirtualKey::parse_str(key_str).ok_or_else(|| format!("Unknown key: {}", key_str))?;
+            let vk = VirtualKey::parse_str(key_str)
+                .ok_or_else(|| format!("Unknown key: {}", key_str))?;
 
             let event = match key_type {
                 "down" => KeyboardEvent::KeyDown { key: vk },

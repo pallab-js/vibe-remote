@@ -1,8 +1,11 @@
 //! Frame encoding and compression for network streaming
 //!
-//! Provides efficient frame encoding using JPEG compression
-//! and delta encoding for reduced bandwidth.
+//! Provides efficient frame encoding using JPEG compression.
 //! Uses buffer pooling to minimize allocations.
+//!
+//! ponytail: XOR delta encoding was removed — deltas were computed against the
+//! raw BGRA frame, which a JPEG-only receiver can never reconstruct. Reintroduce
+//! deltas only with a reference-frame protocol (receiver ACKs the last raw frame).
 
 use flate2::Compression;
 use flate2::read::ZlibEncoder;
@@ -60,17 +63,6 @@ pub struct EncodedFrame {
     pub sequence: u64,
     /// Timestamp (ms since session start)
     pub timestamp: u128,
-    /// Frame type (keyframe or delta)
-    pub frame_type: FrameType,
-}
-
-/// Frame type for compression optimization
-#[derive(Clone, Debug)]
-pub enum FrameType {
-    /// Full frame (I-frame)
-    KeyFrame,
-    /// Delta from previous frame (P-frame)
-    DeltaFrame,
 }
 
 /// Frame encoder with compression
@@ -79,8 +71,6 @@ pub enum FrameType {
 pub struct FrameEncoder {
     /// Current sequence number
     sequence: u64,
-    /// Previous frame for delta encoding (stored as compressed delta)
-    previous_frame: Option<Vec<u8>>,
     /// JPEG quality (1-100)
     quality: u8,
     /// Target resolution scale (1.0 = full, 0.5 = half)
@@ -94,7 +84,6 @@ impl FrameEncoder {
     pub fn new(quality: u8, scale: f32) -> Self {
         Self {
             sequence: 0,
-            previous_frame: None,
             quality,
             scale,
             pool: std::sync::Arc::new(std::sync::Mutex::new(BufferPool::new(8))),
@@ -112,28 +101,12 @@ impl FrameEncoder {
         let scaled_width = (width as f32 * self.scale) as u32;
         let scaled_height = (height as f32 * self.scale) as u32;
 
-        // Determine if this should be a keyframe
-        let is_keyframe = self.previous_frame.is_none() || self.sequence % 30 == 0;
-
-        let encoded_data = if is_keyframe {
-            // Encode full frame as JPEG
-            self.encode_jpeg_frame(data, width, height)?
-        } else {
-            // Encode delta from previous frame
-            self.encode_delta_frame(data, width, height)?
-        };
-
         let frame = EncodedFrame {
-            data: encoded_data,
+            data: self.encode_jpeg_frame(data, width, height)?,
             width: scaled_width,
             height: scaled_height,
             sequence: self.sequence,
             timestamp,
-            frame_type: if is_keyframe {
-                FrameType::KeyFrame
-            } else {
-                FrameType::DeltaFrame
-            },
         };
 
         self.sequence += 1;
@@ -194,52 +167,7 @@ impl FrameEncoder {
             .read_to_end(&mut compressed)
             .map_err(|e| VibeError::Capture(format!("Zlib compression failed: {}", e)))?;
 
-        // Store for delta encoding
-        self.previous_frame = Some(data.to_vec());
-
         Ok(compressed)
-    }
-
-    /// Encode delta from previous frame
-    fn encode_delta_frame(
-        &mut self,
-        data: &[u8],
-        width: usize,
-        height: usize,
-    ) -> VibeResult<Vec<u8>> {
-        if let Some(ref prev) = self.previous_frame {
-            // Calculate XOR delta
-            let mut delta = vec![0u8; data.len()];
-            let mut changed_pixels = 0;
-
-            for i in 0..data.len() {
-                delta[i] = data[i] ^ prev[i];
-                if delta[i] != 0 {
-                    changed_pixels += 1;
-                }
-            }
-
-            // If more than 50% changed, send full frame instead
-            let threshold = (data.len() as f32 * 0.5) as usize;
-            if changed_pixels > threshold {
-                return self.encode_jpeg_frame(data, width, height);
-            }
-
-            // Compress delta
-            let mut encoder = ZlibEncoder::new(delta.as_slice(), Compression::fast());
-            let mut compressed = Vec::new();
-            encoder
-                .read_to_end(&mut compressed)
-                .map_err(|e| VibeError::Capture(format!("Delta compression failed: {}", e)))?;
-
-            // Update previous frame
-            self.previous_frame = Some(data.to_vec());
-
-            Ok(compressed)
-        } else {
-            // No previous frame, send full frame
-            self.encode_jpeg_frame(data, width, height)
-        }
     }
 
     /// Decode a received frame

@@ -59,7 +59,8 @@ impl ConnectionStateMachine {
     }
 
     pub fn get_phase(&self) -> ConnectionPhase {
-        self.phase.lock()
+        self.phase
+            .lock()
             .map(|g| g.clone())
             .unwrap_or_else(|_| ConnectionPhase::Error {
                 code: 1,
@@ -76,15 +77,17 @@ impl ConnectionStateMachine {
     pub fn get_event(&self) -> ConnectionEvent {
         ConnectionEvent {
             phase: self.get_phase(),
-            peer_id: self.peer_id.lock()
+            peer_id: self
+                .peer_id
+                .lock()
                 .map(|g| g.clone())
                 .unwrap_or_else(|_| None),
-            server_fingerprint: self.fingerprint.lock()
+            server_fingerprint: self
+                .fingerprint
+                .lock()
                 .map(|g| g.clone())
                 .unwrap_or_else(|_| None),
-            latency_ms: self.latency_ms.lock()
-                .map(|g| *g)
-                .unwrap_or_else(|_| None),
+            latency_ms: self.latency_ms.lock().map(|g| *g).unwrap_or_else(|_| None),
         }
     }
 

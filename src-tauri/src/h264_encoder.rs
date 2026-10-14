@@ -80,7 +80,10 @@ impl H264Encoder {
                     encoder.hw_available.store(true, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    warn!("VideoToolbox initialization failed: {}, falling back to software", e);
+                    warn!(
+                        "VideoToolbox initialization failed: {}, falling back to software",
+                        e
+                    );
                     encoder.hw_available.store(false, Ordering::SeqCst);
                 }
             }
@@ -143,7 +146,9 @@ impl H264Encoder {
     }
 
     fn encode_hw(&self, _bgra_data: &[u8], _timestamp: u128) -> VibeResult<Vec<u8>> {
-        Err(VibeError::Capture("Hardware encoding not yet operational".to_string()))
+        Err(VibeError::Capture(
+            "Hardware encoding not yet operational".to_string(),
+        ))
     }
 
     fn encode_software(
@@ -154,7 +159,9 @@ impl H264Encoder {
         _is_keyframe: bool,
     ) -> VibeResult<Vec<u8>> {
         if let Some(ref encoder) = self.fallback_encoder {
-            let mut enc = encoder.lock().map_err(|e| VibeError::Capture(e.to_string()))?;
+            let mut enc = encoder
+                .lock()
+                .map_err(|e| VibeError::Capture(e.to_string()))?;
             let frame = enc.encode_frame(
                 bgra_data,
                 self.config.width as usize,

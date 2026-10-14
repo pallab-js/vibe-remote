@@ -48,7 +48,7 @@ pub struct PendingConnection {
 pub struct AppState {
     pub capture_stream: Mutex<Option<Arc<CaptureStream>>>,
     pub quic_transport: Mutex<Option<Arc<QuicTransport>>>,
-    pub input_handler: Mutex<InputHandler>,
+    pub input_handler: Mutex<Option<InputHandler>>,
     pub frame_encoder: Mutex<Option<FrameEncoder>>,
     pub h264_encoder: Mutex<Option<H264Encoder>>,
     pub session_state: SessionState,
@@ -116,7 +116,7 @@ async fn init_vibe(state: State<'_, AppState>) -> Result<String, String> {
     match InputHandler::new() {
         Ok(input) => {
             if let Ok(mut guard) = state.input_handler.lock() {
-                *guard = input;
+                *guard = Some(input);
             } else {
                 error!("Failed to lock input handler");
             }
@@ -126,6 +126,7 @@ async fn init_vibe(state: State<'_, AppState>) -> Result<String, String> {
             if err_msg.contains("permission") || err_msg.contains("Accessibility") {
                 error!("Input handler requires Accessibility permission");
             }
+            // Leave as None - input commands will return a friendly error
         }
     }
 
@@ -224,8 +225,10 @@ async fn start_capture(
 
     // Create and store capture stream
     let capture = Arc::new(CaptureStream::new(config));
-    *state.capture_stream.lock()
-            .map_err(|_| "Failed to lock capture stream")? = Some(capture.clone());
+    *state
+        .capture_stream
+        .lock()
+        .map_err(|_| "Failed to lock capture stream")? = Some(capture.clone());
 
     // Now the lock is released, we can safely await
     let mut receiver = capture.get_primary_stream().await
@@ -243,7 +246,7 @@ async fn start_capture(
         let mut frame_count = 0u32;
         let mut last_fps_update = std::time::Instant::now();
 
-        while let Some(frame) = receiver.recv().await {
+        while let Some(mut frame) = receiver.recv().await {
             frame_count += 1;
 
             // Calculate FPS
@@ -252,6 +255,11 @@ async fn start_capture(
                 debug!("Capture FPS: {}", frame_count);
                 frame_count = 0;
                 last_fps_update = now;
+            }
+
+            // Invariant #1: pixel data is RGBA in transit; ScreenCaptureKit gives BGRA
+            for px in frame.data.chunks_exact_mut(4) {
+                px.swap(0, 2);
             }
 
             let frame_data = FrameData {
@@ -276,8 +284,10 @@ async fn start_capture(
 fn stop_capture(state: State<'_, AppState>) -> Result<String, String> {
     info!("Stopping screen capture");
 
-    let guard = state.capture_stream.lock()
-            .map_err(|_| "Failed to lock capture stream")?;
+    let guard = state
+        .capture_stream
+        .lock()
+        .map_err(|_| "Failed to lock capture stream")?;
     if let Some(capture) = guard.as_ref() {
         capture.stop();
     }
@@ -335,7 +345,9 @@ async fn connect_remote(
             .map_err(|e| format!("QUIC init failed: {}", e))?;
 
         if let Some(fp) = fingerprint {
-            quic.connect_with_fingerprint(fp).await.map_err(|e| e.to_string())?;
+            quic.connect_with_fingerprint(fp)
+                .await
+                .map_err(|e| e.to_string())?;
         } else {
             quic.connect_tofu().await.map_err(|e| e.to_string())?;
         }
@@ -345,9 +357,14 @@ async fn connect_remote(
 
     // Get connection manager reference (drop guard before async)
     let manager_ref = {
-        let guard = state.connection_manager.lock()
+        let guard = state
+            .connection_manager
+            .lock()
             .map_err(|_| "Failed to lock connection manager")?;
-        guard.as_ref().cloned().ok_or("Connection manager not initialized")?
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or("Connection manager not initialized")?
     };
 
     // Prepare owned connection params
@@ -381,7 +398,10 @@ async fn connect_remote(
     }
 
     // Update session state to connected
-    state.session_state.is_active.store(true, std::sync::atomic::Ordering::SeqCst);
+    state
+        .session_state
+        .is_active
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Spawn frame receive loop in background with reconnection support
     let app_clone = app.clone();
@@ -449,12 +469,16 @@ async fn connect_remote(
                 Err(e) => {
                     debug!("Frame receive error: {}", e);
                     consecutive_errors += 1;
-                    
+
                     if consecutive_errors >= MAX_ERRORS_BEFORE_RECONNECT {
-                        warn!("Connection lost ({} errors), emitting reconnection event", consecutive_errors);
-                        
+                        warn!(
+                            "Connection lost ({} errors), emitting reconnection event",
+                            consecutive_errors
+                        );
+
                         // Emit event so frontend can trigger reconnection
-                        let _ = app_clone.emit("connection_lost", serde_json::json!({"reason": "timeout"}));
+                        let _ = app_clone
+                            .emit("connection_lost", serde_json::json!({"reason": "timeout"}));
                         break;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -478,8 +502,10 @@ async fn start_remote_stream(
 
     // Initialize frame encoder
     let encoder = FrameEncoder::default();
-    *state.frame_encoder.lock()
-            .map_err(|_| "Failed to lock encoder")? = Some(encoder);
+    *state
+        .frame_encoder
+        .lock()
+        .map_err(|_| "Failed to lock encoder")? = Some(encoder);
 
     // Start capture
     let display_idx = display_index.unwrap_or(0);
@@ -489,8 +515,10 @@ async fn start_remote_stream(
     };
 
     let capture = Arc::new(CaptureStream::new(config));
-    *state.capture_stream.lock()
-            .map_err(|_| "Failed to lock capture stream")? = Some(capture.clone());
+    *state
+        .capture_stream
+        .lock()
+        .map_err(|_| "Failed to lock capture stream")? = Some(capture.clone());
 
     let receiver = capture
         .get_primary_stream()
@@ -499,21 +527,27 @@ async fn start_remote_stream(
 
     // Get QUIC transport
     let quic_arc = {
-        let quic_guard = state.quic_transport.lock()
+        let quic_guard = state
+            .quic_transport
+            .lock()
             .map_err(|_| "Failed to lock QUIC transport")?;
         quic_guard.as_ref().ok_or("QUIC not initialized")?.clone()
     };
 
     // Get input handler
-    let _input_guard = state.input_handler.lock()
-            .map_err(|_| "Failed to lock input handler")?;
+    let _input_guard = state
+        .input_handler
+        .lock()
+        .map_err(|_| "Failed to lock input handler")?;
     #[allow(clippy::arc_with_non_send_sync)]
     let _input_arc = Arc::new(_input_guard.clone());
     drop(_input_guard);
 
     // Get encoder
-    let enc_guard = state.frame_encoder.lock()
-            .map_err(|_| "Failed to lock encoder")?;
+    let enc_guard = state
+        .frame_encoder
+        .lock()
+        .map_err(|_| "Failed to lock encoder")?;
     let enc = enc_guard.as_ref().ok_or("Encoder not initialized")?;
     let enc_arc = Arc::new(Mutex::new(enc.clone()));
     drop(enc_guard);
@@ -525,8 +559,10 @@ async fn start_remote_stream(
     });
 
     // Mark as server mode
-    *state.is_server_mode.lock()
-            .map_err(|_| "Failed to lock is_server_mode")? = true;
+    *state
+        .is_server_mode
+        .lock()
+        .map_err(|_| "Failed to lock is_server_mode")? = true;
     state
         .session_state
         .is_active
@@ -598,8 +634,13 @@ fn send_mouse_input(
     // SEC-2: Rate limiting - max 100 mouse events per second
     check_rate_limit(&state, "send_mouse_input", 100, 1)?;
 
-    let input = state.input_handler.lock()
-            .map_err(|_| "Failed to lock input handler")?;
+    let input_guard = state
+        .input_handler
+        .lock()
+        .map_err(|_| "Failed to lock input handler")?;
+    let input = input_guard
+            .as_ref()
+            .ok_or("Input unavailable: grant Accessibility permission in System Settings > Privacy & Security > Accessibility, then restart")?;
 
     match event_type.as_str() {
         "move" => {
@@ -657,8 +698,13 @@ fn send_keyboard_input(
     // SEC-2: Rate limiting - max 50 keyboard events per second
     check_rate_limit(&state, "send_keyboard_input", 50, 1)?;
 
-    let input = state.input_handler.lock()
-            .map_err(|_| "Failed to lock input handler")?;
+    let input_guard = state
+        .input_handler
+        .lock()
+        .map_err(|_| "Failed to lock input handler")?;
+    let input = input_guard
+            .as_ref()
+            .ok_or("Input unavailable: grant Accessibility permission in System Settings > Privacy & Security > Accessibility, then restart")?;
 
     match event_type.as_str() {
         "text" => {
@@ -699,7 +745,9 @@ async fn send_frame_remote(
 ) -> Result<String, String> {
     // Get QUIC transport (release lock immediately)
     let quic_arc = {
-        let quic_guard = state.quic_transport.lock()
+        let quic_guard = state
+            .quic_transport
+            .lock()
             .map_err(|_| "Failed to lock QUIC transport")?;
         quic_guard.as_ref().cloned()
     };
@@ -708,7 +756,9 @@ async fn send_frame_remote(
 
     // Encode frame (release lock before async)
     let encoded = {
-        let mut encoder_guard = state.frame_encoder.lock()
+        let mut encoder_guard = state
+            .frame_encoder
+            .lock()
             .map_err(|_| "Failed to lock encoder")?;
         let encoder = encoder_guard
             .as_mut()
@@ -725,10 +775,7 @@ async fn send_frame_remote(
         "w": encoded.width,
         "h": encoded.height,
         "ts": encoded.timestamp,
-        "type": match encoded.frame_type {
-            encoder::FrameType::KeyFrame => "key",
-            encoder::FrameType::DeltaFrame => "delta",
-        },
+        "type": "key",
         "data": base64_encode(&encoded.data),
     });
 
@@ -760,7 +807,9 @@ async fn forward_input_remote(
 ) -> Result<String, String> {
     // Get QUIC transport
     let quic_arc = {
-        let quic_guard = state.quic_transport.lock()
+        let quic_guard = state
+            .quic_transport
+            .lock()
             .map_err(|_| "Failed to lock QUIC transport")?;
         quic_guard.as_ref().cloned()
     };
@@ -794,8 +843,10 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 /// Get connection status
 #[tauri::command]
 fn get_connection_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let guard = state.quic_transport.lock()
-            .map_err(|_| "Failed to lock QUIC transport")?;
+    let guard = state
+        .quic_transport
+        .lock()
+        .map_err(|_| "Failed to lock QUIC transport")?;
     let is_connected = guard.as_ref().map(|q| q.is_connected()).unwrap_or(false);
     let session = &state.session_state;
     let stats = session.get_stats();
@@ -819,8 +870,10 @@ fn get_connection_status(state: State<'_, AppState>) -> Result<serde_json::Value
 /// Get server certificate fingerprint for sharing with clients
 #[tauri::command]
 fn get_server_fingerprint(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let guard = state.quic_transport.lock()
-            .map_err(|_| "Failed to lock QUIC transport")?;
+    let guard = state
+        .quic_transport
+        .lock()
+        .map_err(|_| "Failed to lock QUIC transport")?;
     Ok(guard.as_ref().and_then(|q| q.get_certificate_fingerprint()))
 }
 
@@ -876,7 +929,9 @@ async fn request_file(state: State<'_, AppState>, file_path: String) -> Result<S
 
     // Check if connected
     let is_connected = {
-        let quic_guard = state.quic_transport.lock()
+        let quic_guard = state
+            .quic_transport
+            .lock()
             .map_err(|_| "Failed to lock QUIC transport")?;
         quic_guard
             .as_ref()
@@ -901,7 +956,9 @@ async fn send_file(state: State<'_, AppState>, file_path: String) -> Result<Stri
 
     // Check if connected
     let is_connected = {
-        let quic_guard = state.quic_transport.lock()
+        let quic_guard = state
+            .quic_transport
+            .lock()
             .map_err(|_| "Failed to lock QUIC transport")?;
         quic_guard
             .as_ref()
@@ -925,8 +982,10 @@ fn check_rate_limit(
     max_calls: usize,
     window_secs: u64,
 ) -> Result<(), String> {
-    let mut timestamps = state.command_timestamps.lock()
-            .map_err(|_| "Failed to lock command_timestamps")?;
+    let mut timestamps = state
+        .command_timestamps
+        .lock()
+        .map_err(|_| "Failed to lock command_timestamps")?;
     let now = std::time::Instant::now();
     let window = std::time::Duration::from_secs(window_secs);
 
@@ -1060,8 +1119,10 @@ fn get_consent_status(state: State<'_, AppState>) -> Result<serde_json::Value, S
 /// Get pending connection requests
 #[tauri::command]
 fn get_pending_connections(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
-    let pending = state.pending_connections.lock()
-            .map_err(|_| "Failed to lock pending_connections")?;
+    let pending = state
+        .pending_connections
+        .lock()
+        .map_err(|_| "Failed to lock pending_connections")?;
 
     // Clean up expired requests (older than 60 seconds)
     let now = std::time::Instant::now();
@@ -1098,8 +1159,10 @@ fn approve_connection(
 /// Reject a pending connection
 #[tauri::command]
 fn reject_connection(state: State<'_, AppState>, remote_address: String) -> Result<String, String> {
-    let mut pending = state.pending_connections.lock()
-            .map_err(|_| "Failed to lock pending_connections")?;
+    let mut pending = state
+        .pending_connections
+        .lock()
+        .map_err(|_| "Failed to lock pending_connections")?;
     pending.retain(|p| p.remote_address != remote_address);
     warn!("SECURITY: Connection rejected from {}", remote_address);
     Ok(format!("Connection from {} rejected", remote_address))
@@ -1142,8 +1205,10 @@ fn generate_identity(
     // Load and store in state
     let identity = auth::PeerIdentity::load(&key_path)
         .map_err(|e| format!("Failed to load identity: {}", e))?;
-    *state.identity.lock()
-            .map_err(|_| "Failed to lock identity")? = Some(identity);
+    *state
+        .identity
+        .lock()
+        .map_err(|_| "Failed to lock identity")? = Some(identity);
 
     info!("Generated new identity: {}", public.name);
     Ok(public)
@@ -1165,8 +1230,10 @@ fn load_identity(state: State<'_, AppState>) -> Result<Option<auth::PublicIdenti
 
     let identity = auth::PeerIdentity::load(&key_path)
         .map_err(|e| format!("Failed to load identity: {}", e))?;
-    *state.identity.lock()
-            .map_err(|_| "Failed to lock identity")? = Some(identity);
+    *state
+        .identity
+        .lock()
+        .map_err(|_| "Failed to lock identity")? = Some(identity);
 
     Ok(Some(public))
 }
@@ -1174,8 +1241,10 @@ fn load_identity(state: State<'_, AppState>) -> Result<Option<auth::PublicIdenti
 /// Get current identity
 #[tauri::command]
 fn get_identity(state: State<'_, AppState>) -> Result<Option<auth::PublicIdentity>, String> {
-    let guard = state.identity.lock()
-            .map_err(|_| "Failed to lock identity")?;
+    let guard = state
+        .identity
+        .lock()
+        .map_err(|_| "Failed to lock identity")?;
     Ok(guard.as_ref().map(|id| id.public_identity()))
 }
 
@@ -1229,12 +1298,17 @@ pub fn run() {
         .manage(AppState {
             capture_stream: Mutex::new(None),
             quic_transport: Mutex::new(None),
-            // Create input handler - try to initialize, use placeholder if it fails
+            // Input handler is optional — created without Accessibility permission;
+            // input commands fail with a friendly error until the user grants it
             input_handler: Mutex::new(
-                InputHandler::new().unwrap_or_else(|e| {
-                    error!("Input handler init failed: {} - will retry on first use", e);
-                    panic!("Input handler requires Accessibility permission. Please grant in System Preferences > Security & Privacy > Privacy > Accessibility")
-                }),
+                InputHandler::new()
+                    .map_err(|e| {
+                        error!(
+                            "Input handler init failed: {} - input disabled until granted",
+                            e
+                        );
+                    })
+                    .ok(),
             ),
             frame_encoder: Mutex::new(None),
             h264_encoder: Mutex::new(None),

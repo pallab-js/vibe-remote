@@ -73,10 +73,10 @@ impl RingBuffer {
     fn write(&mut self, data: &[u8]) -> usize {
         let available = self.available_space();
         let to_write = available.min(data.len());
-        
+
         let end = (self.write_pos + to_write).min(self.capacity);
         self.buffer[self.write_pos..end].copy_from_slice(&data[..end - self.write_pos]);
-        
+
         if end == self.capacity && to_write > 0 {
             let remaining = to_write - (end - self.write_pos);
             self.buffer[..remaining].copy_from_slice(&data[end - self.write_pos..to_write]);
@@ -84,17 +84,17 @@ impl RingBuffer {
         } else {
             self.write_pos = end;
         }
-        
+
         to_write
     }
 
     fn read(&mut self, out: &mut [u8]) -> usize {
         let available = self.available_data();
         let to_read = available.min(out.len());
-        
+
         let end = (self.read_pos + to_read).min(self.capacity);
         out[..end - self.read_pos].copy_from_slice(&self.buffer[self.read_pos..end]);
-        
+
         if end == self.capacity && to_read > 0 {
             let remaining = to_read - (end - self.read_pos);
             out[end - self.read_pos..to_read].copy_from_slice(&self.buffer[..remaining]);
@@ -102,7 +102,7 @@ impl RingBuffer {
         } else {
             self.read_pos = end;
         }
-        
+
         to_read
     }
 
@@ -126,15 +126,17 @@ impl RingBuffer {
 
 impl AudioCapture {
     pub fn new(config: AudioConfig) -> VibeResult<Self> {
-        let buffer_size_bytes = config.buffer_size as usize * config.channels as usize * (config.bits_per_sample as usize / 8);
-        
+        let buffer_size_bytes = config.buffer_size as usize
+            * config.channels as usize
+            * (config.bits_per_sample as usize / 8);
+
         info!(
             "Initializing audio capture: {}Hz, {}ch, {}bit, {}byte buffer",
             config.sample_rate, config.channels, config.bits_per_sample, buffer_size_bytes
         );
 
         let ring = RingBuffer::new(buffer_size_bytes * 10);
-        
+
         Ok(Self {
             config,
             is_capturing: AtomicBool::new(false),
